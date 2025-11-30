@@ -11,6 +11,8 @@ const LogString *decoder_variant_to_string(DecoderVariant variant) {
       return LOG_STR("uplift");
     case DECODER_VARIANT_OMNIDESK:
       return LOG_STR("omnidesk");
+    case DECODER_VARIANT_WN17CM3:
+      return LOG_STR("wn17cm3");
     default:
       return LOG_STR("unknown");
   }
