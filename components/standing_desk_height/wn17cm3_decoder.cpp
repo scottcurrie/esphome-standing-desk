@@ -151,5 +151,37 @@ float Wn17cm3Decoder::decode() {
   return last_height_;
 }
 
+void Wn17cm3Decoder::send_command(const char *cmd) {
+  if (this->uart_ == nullptr) {
+    ESP_LOGW(TAG, "Cannot send command: UART not configured");
+    return;
+  }
+
+  size_t len = strlen(cmd);
+  uint8_t checksum = calculate_checksum(cmd, len);
+
+  // Format: :command<checksum>;
+  // Checksum is 2-char uppercase hex
+  char msg[BUF_SIZE];
+  snprintf(msg, sizeof(msg), ":%s%02X;", cmd, checksum);
+
+  ESP_LOGD(TAG, "Sending command: %s", msg);
+  this->uart_->write_str(msg);
+}
+
+void Wn17cm3Decoder::send_key_pressed(const char *key) {
+  // Format: K<key>M (M = pressed)
+  char cmd[8];
+  snprintf(cmd, sizeof(cmd), "K%sM", key);
+  send_command(cmd);
+}
+
+void Wn17cm3Decoder::send_key_released(const char *key) {
+  // Format: K<key>B (B = released)
+  char cmd[8];
+  snprintf(cmd, sizeof(cmd), "K%sB", key);
+  send_command(cmd);
+}
+
 }  // namespace standing_desk_height
 }  // namespace esphome

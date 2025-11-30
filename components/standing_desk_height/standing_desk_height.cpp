@@ -22,9 +22,12 @@ void StandingDeskHeightSensor::set_decoder_variant(DecoderVariant decoder_varian
     case DECODER_VARIANT_OMNIDESK:
       this->decoder = new OmnideskDecoder();
       break;
-    case DECODER_VARIANT_WN17CM3:
-      this->decoder = new Wn17cm3Decoder();
+    case DECODER_VARIANT_WN17CM3: {
+      auto *dec = new Wn17cm3Decoder();
+      dec->set_uart(this);
+      this->decoder = dec;
       break;
+    }
     case DECODER_VARIANT_UNKNOWN:
       this->decoder = nullptr;
       return;
@@ -123,6 +126,46 @@ void StandingDeskHeightSensor::dump_config() {
 
 float StandingDeskHeightSensor::get_last_read() {
   return this->last_read;
+}
+
+Wn17cm3Decoder* StandingDeskHeightSensor::get_wn17cm3_decoder() {
+  if (this->decoder_variant == DECODER_VARIANT_WN17CM3) {
+    return static_cast<Wn17cm3Decoder*>(this->decoder);
+  }
+  return nullptr;
+}
+
+bool StandingDeskHeightSensor::supports_uart_control() {
+  return this->decoder_variant == DECODER_VARIANT_WN17CM3;
+}
+
+void StandingDeskHeightSensor::move_up() {
+  if (auto *dec = get_wn17cm3_decoder()) {
+    dec->send_key_pressed("UA");
+  }
+}
+
+void StandingDeskHeightSensor::move_down() {
+  if (auto *dec = get_wn17cm3_decoder()) {
+    dec->send_key_pressed("DA");
+  }
+}
+
+void StandingDeskHeightSensor::stop() {
+  if (auto *dec = get_wn17cm3_decoder()) {
+    dec->send_key_released("UA");
+    dec->send_key_released("DA");
+  }
+}
+
+void StandingDeskHeightSensor::preset(uint8_t num) {
+  if (auto *dec = get_wn17cm3_decoder()) {
+    // Keys are " 1", " 2", " 3", " 4" (space prefix)
+    const char *keys[] = {" 1", " 2", " 3", " 4"};
+    if (num >= 1 && num <= 4) {
+      dec->send_key_pressed(keys[num - 1]);
+    }
+  }
 }
 
 }

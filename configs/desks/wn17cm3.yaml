@@ -1,0 +1,7 @@
+substitutions:
+  standing_desk_uart_rx_pin: "D2"
+  standing_desk_uart_tx_pin: "D1"
+  standing_desk_variant: "wn17cm3"
+  standing_desk_min_height: "60"
+  standing_desk_max_height: "125"
+  standing_desk_height_units: "cm"

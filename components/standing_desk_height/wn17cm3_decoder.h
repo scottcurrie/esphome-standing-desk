@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include "decoder.h"
+#include "esphome/components/uart/uart.h"
 
 namespace esphome {
 namespace standing_desk_height {
@@ -18,7 +19,16 @@ class Wn17cm3Decoder : public Decoder {
   bool put(uint8_t b) override;
   float decode() override;
 
+  // UART control for sending commands
+  void set_uart(uart::UARTDevice *uart) { this->uart_ = uart; }
+
+  // Command sending methods
+  void send_key_pressed(const char *key);
+  void send_key_released(const char *key);
+
  protected:
+  uart::UARTDevice *uart_{nullptr};
+
   // Line buffer for ASCII protocol (accumulate between ':' and ';')
   static const size_t BUF_SIZE = 32;
   char buf_[BUF_SIZE];
@@ -32,6 +42,7 @@ class Wn17cm3Decoder : public Decoder {
   bool process_message();
   bool parse_display_command();
   uint8_t hex_char_to_nibble(char c);
+  void send_command(const char *cmd);
 };
 
 }  // namespace standing_desk_height

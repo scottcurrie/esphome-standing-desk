@@ -1,0 +1,177 @@
+# ESPHome Test Configuration for WN17CM3 Standing Desk Controller
+# Hardware: HiLetgo ESP-WROOM-32 DevKit
+#
+# Wiring (RJ45 breakout to ESP32):
+#   RJ45 Pin 2 (RX)  -> GPIO17 (TX2)
+#   RJ45 Pin 3 (GND) -> GND
+#   RJ45 Pin 4 (TX)  -> GPIO16 (RX2)
+#   RJ45 Pin 5 (5V)  -> VIN (optional, or use USB power)
+
+esphome:
+  name: standing-desk
+  friendly_name: Standing Desk
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+# Enable logging - set to DEBUG for testing
+logger:
+  level: DEBUG
+  baud_rate: 115200
+
+# WiFi configuration - UPDATE THESE VALUES
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  # Enable fallback hotspot if WiFi fails
+  ap:
+    ssid: "Standing-Desk-Fallback"
+    password: "desk12345"
+
+captive_portal:
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+# Enable OTA updates
+ota:
+  platform: esphome
+  password: !secret ota_password
+
+# Web server for local testing (optional but useful)
+web_server:
+  port: 80
+
+# External component from local path
+external_components:
+  - source:
+      type: local
+      path: ../components
+    components: [standing_desk_height]
+
+# UART configuration for WN17CM3
+# Baud rate: 19200 (different from other desk controllers!)
+uart:
+  id: standing_desk_uart
+  rx_pin: GPIO16
+  tx_pin: GPIO17
+  baud_rate: 19200
+
+# Standing desk height sensor
+sensor:
+  - platform: standing_desk_height
+    id: desk_height
+    name: "Desk Height"
+    unit_of_measurement: "cm"
+    variant: wn17cm3
+    update_interval: 500ms
+    accuracy_decimals: 1
+
+  # Optional: WiFi signal strength for debugging connectivity
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    update_interval: 60s
+
+# Target height number input
+number:
+  - platform: template
+    id: target_desk_height
+    name: "Target Desk Height"
+    unit_of_measurement: "cm"
+    restore_value: true
+    optimistic: true
+    min_value: 60
+    max_value: 125
+    step: 0.1
+    set_action:
+      then:
+        - if:
+            condition:
+              lambda: "return id(desk_height).state > x;"
+            then:
+              - logger.log: "Moving desk DOWN"
+              - standing_desk_height.move_down: desk_height
+              - wait_until:
+                  condition:
+                    lambda: "return id(desk_height).state <= x + 0.4;"
+                  timeout: 20s
+              - standing_desk_height.stop: desk_height
+              - logger.log: "Desk stopped"
+            else:
+              - logger.log: "Moving desk UP"
+              - standing_desk_height.move_up: desk_height
+              - wait_until:
+                  condition:
+                    lambda: "return id(desk_height).state >= x - 0.4;"
+                  timeout: 20s
+              - standing_desk_height.stop: desk_height
+              - logger.log: "Desk stopped"
+
+# Control buttons
+button:
+  - platform: template
+    name: "Desk Up"
+    icon: mdi:arrow-up-bold
+    on_press:
+      - logger.log: "UP button pressed"
+      - standing_desk_height.move_up: desk_height
+      - delay: 100ms
+      - standing_desk_height.stop: desk_height
+
+  - platform: template
+    name: "Desk Down"
+    icon: mdi:arrow-down-bold
+    on_press:
+      - logger.log: "DOWN button pressed"
+      - standing_desk_height.move_down: desk_height
+      - delay: 100ms
+      - standing_desk_height.stop: desk_height
+
+  - platform: template
+    name: "Desk Preset 1"
+    icon: mdi:numeric-1-box
+    on_press:
+      - logger.log: "Preset 1 pressed"
+      - standing_desk_height.preset:
+          id: desk_height
+          preset: 1
+
+  - platform: template
+    name: "Desk Preset 2"
+    icon: mdi:numeric-2-box
+    on_press:
+      - logger.log: "Preset 2 pressed"
+      - standing_desk_height.preset:
+          id: desk_height
+          preset: 2
+
+  - platform: template
+    name: "Desk Preset 3"
+    icon: mdi:numeric-3-box
+    on_press:
+      - logger.log: "Preset 3 pressed"
+      - standing_desk_height.preset:
+          id: desk_height
+          preset: 3
+
+  - platform: template
+    name: "Desk Preset 4"
+    icon: mdi:numeric-4-box
+    on_press:
+      - logger.log: "Preset 4 pressed"
+      - standing_desk_height.preset:
+          id: desk_height
+          preset: 4
+
+  # Restart button for testing
+  - platform: restart
+    name: "Restart ESP32"
+
+# Status LED (uses built-in LED on most ESP32 DevKit boards)
+status_led:
+  pin: GPIO2

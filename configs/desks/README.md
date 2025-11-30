@@ -29,3 +29,13 @@ packages:
   standing_desk: github://tjhorner/esphome-standing-desk/configs/template.yaml
   desk_config: github://tjhorner/esphome-standing-desk/configs/desks/fully_jarvis.yaml
 ```
+
+### WN17CM3 / WN17CM2 (Hangzhou Winner)
+
+This variant uses UART control instead of GPIO pins for up/down movement. It requires a TX pin in addition to RX, and uses 19200 baud. Height is reported in centimeters.
+
+```yaml
+packages:
+  standing_desk: github://tjhorner/esphome-standing-desk/configs/template_wn17cm3.yaml
+  desk_config: github://tjhorner/esphome-standing-desk/configs/desks/wn17cm3.yaml
+```

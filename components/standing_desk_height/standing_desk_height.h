@@ -27,6 +27,13 @@ public:
   void dump_config() override;
   float get_last_read();
 
+  // UART control methods (for WN17CM3)
+  void move_up();
+  void move_down();
+  void stop();
+  void preset(uint8_t num);
+  bool supports_uart_control();
+
 protected:
   Decoder* decoder;
   DecoderVariant decoder_variant = DECODER_VARIANT_UNKNOWN;
@@ -38,6 +45,7 @@ protected:
   uint32_t started_detecting_at = 0;
 
   void try_next_decoder();
+  Wn17cm3Decoder* get_wn17cm3_decoder();
 };
 
 }
