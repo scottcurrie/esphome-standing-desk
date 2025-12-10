@@ -1,0 +1,284 @@
+# Platform Slave Configuration for Synchronized Lift Platform
+# Each slave desk (2-5) runs this configuration with a unique desk_id
+#
+# Usage:
+#   1. Copy this file for each slave desk
+#   2. Change desk_id substitution to 2, 3, 4, or 5
+#   3. Set standalone_mode to "true" for individual testing
+#
+# Hardware: ESP32 DevKit connected to WN17CM3 desk controller via RJ45
+# Wiring:
+#   RJ45 Pin 2 (Blue)   -> GPIO17 (TX2)
+#   RJ45 Pin 3 (Black)  -> GND
+#   RJ45 Pin 4 (Yellow) -> GPIO16 (RX2)
+#   RJ45 Pin 5 (Red)    -> VIN (5V power from desk)
+
+substitutions:
+  desk_id: "2"  # Change for each slave: 2, 3, 4, 5
+  device_name: platform-desk-${desk_id}
+  standalone_mode: "false"  # Set "true" for individual desk testing without master
+  # ESP-NOW channel must match master
+  espnow_channel: "1"
+
+esphome:
+  name: ${device_name}
+  friendly_name: "Platform Desk ${desk_id}"
+  on_boot:
+    priority: 200
+    then:
+      - lambda: |-
+          ESP_LOGI("platform_slave", "Platform Desk ${desk_id} booting...");
+          ESP_LOGI("platform_slave", "Standalone mode: ${standalone_mode}");
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+# WiFi - always enabled for OTA and logging
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: none
+
+  ap:
+    ssid: "${device_name}-fallback"
+    password: "desk12345"
+
+captive_portal:
+
+# API for Home Assistant - useful in standalone mode
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+# OTA updates
+ota:
+  platform: esphome
+  password: !secret ota_password
+
+logger:
+  level: DEBUG
+  baud_rate: 0  # Disable serial logging to avoid UART conflicts
+
+# External component for desk height sensing
+external_components:
+  - source:
+      type: local
+      path: ../../components
+    components: [standing_desk_height]
+
+# UART for desk communication (WN17CM3 @ 19200 baud)
+uart:
+  id: standing_desk_uart
+  rx_pin: GPIO16
+  tx_pin: GPIO17
+  baud_rate: 19200
+
+# Global variables for state tracking
+globals:
+  - id: current_command
+    type: std::string
+    restore_value: no
+    initial_value: '""'
+  - id: is_moving
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: last_height_report_time
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
+# Desk height sensor
+sensor:
+  - platform: standing_desk_height
+    id: desk_height
+    name: "Desk ${desk_id} Height"
+    unit_of_measurement: "cm"
+    variant: wn17cm3
+    update_interval: 100ms  # Fast updates for sync
+    accuracy_decimals: 2
+    on_value:
+      then:
+        - lambda: |-
+            // Report height to master via ESP-NOW when not in standalone mode
+            // Height reports are sent at ~10Hz or on significant change
+            static float last_reported = 0;
+            uint32_t now = millis();
+            float height = id(desk_height).state;
+
+            // Report if: enough time passed OR height changed significantly
+            bool time_elapsed = (now - id(last_height_report_time)) >= 100;  // 10Hz
+            bool height_changed = abs(height - last_reported) >= 0.05;  // 0.5mm change
+
+            if ((time_elapsed || height_changed) && !isnan(height)) {
+              id(last_height_report_time) = now;
+              last_reported = height;
+
+              // Format: "H<id>:<height>" e.g., "H2:72.35"
+              char msg[16];
+              snprintf(msg, sizeof(msg), "H${desk_id}:%.2f", height);
+
+              #ifdef USE_ESPNOW
+              if (std::string("${standalone_mode}") != "true") {
+                // id(espnow_component).broadcast(msg);
+                ESP_LOGD("platform_slave", "Would send: %s", msg);
+              }
+              #endif
+            }
+
+  # WiFi signal for debugging
+  - platform: wifi_signal
+    name: "Desk ${desk_id} WiFi Signal"
+    update_interval: 60s
+
+  # Uptime sensor
+  - platform: uptime
+    name: "Desk ${desk_id} Uptime"
+    update_interval: 60s
+
+# Binary sensor for movement status
+binary_sensor:
+  - platform: template
+    name: "Desk ${desk_id} Moving"
+    id: desk_moving
+    lambda: return id(is_moving);
+
+# Text sensor for current command/status
+text_sensor:
+  - platform: template
+    name: "Desk ${desk_id} Status"
+    id: desk_status
+    lambda: |-
+      if (id(is_moving)) {
+        return id(current_command);
+      }
+      return std::string("idle");
+    update_interval: 1s
+
+# ESP-NOW configuration (disabled in standalone mode)
+# Note: ESP-NOW component must be available in ESPHome
+# espnow:
+#   id: espnow_component
+#   wifi_channel: ${espnow_channel}
+#   on_receive:
+#     - lambda: |-
+#         std::string cmd((char*)data, len);
+#         ESP_LOGD("platform_slave", "Received command: %s", cmd.c_str());
+#
+#         // Handle individual commands (no prefix) or broadcast (*prefix)
+#         bool is_broadcast = cmd[0] == '*';
+#         std::string actual_cmd = is_broadcast ? cmd.substr(1) : cmd;
+#
+#         if (actual_cmd == "U") {
+#           id(desk_height)->move_up();
+#           id(is_moving) = true;
+#           id(current_command) = "UP";
+#         } else if (actual_cmd == "D") {
+#           id(desk_height)->move_down();
+#           id(is_moving) = true;
+#           id(current_command) = "DOWN";
+#         } else if (actual_cmd == "S") {
+#           id(desk_height)->stop();
+#           id(is_moving) = false;
+#           id(current_command) = "";
+#         } else if (actual_cmd == "P1") {
+#           id(desk_height)->preset(1);
+#           id(is_moving) = true;
+#           id(current_command) = "PRESET1";
+#         } else if (actual_cmd == "P2") {
+#           id(desk_height)->preset(2);
+#           id(is_moving) = true;
+#           id(current_command) = "PRESET2";
+#         } else if (actual_cmd == "P3") {
+#           id(desk_height)->preset(3);
+#           id(is_moving) = true;
+#           id(current_command) = "PRESET3";
+#         } else if (actual_cmd == "P4") {
+#           id(desk_height)->preset(4);
+#           id(is_moving) = true;
+#           id(current_command) = "PRESET4";
+#         }
+
+# Local control buttons (always available for testing)
+button:
+  - platform: template
+    name: "Desk ${desk_id} Up"
+    icon: mdi:arrow-up-bold
+    on_press:
+      - lambda: |-
+          id(desk_height)->move_up();
+          id(is_moving) = true;
+          id(current_command) = "UP";
+      - delay: 100ms
+      - lambda: |-
+          id(desk_height)->stop();
+          id(is_moving) = false;
+          id(current_command) = "";
+
+  - platform: template
+    name: "Desk ${desk_id} Down"
+    icon: mdi:arrow-down-bold
+    on_press:
+      - lambda: |-
+          id(desk_height)->move_down();
+          id(is_moving) = true;
+          id(current_command) = "DOWN";
+      - delay: 100ms
+      - lambda: |-
+          id(desk_height)->stop();
+          id(is_moving) = false;
+          id(current_command) = "";
+
+  - platform: template
+    name: "Desk ${desk_id} Stop"
+    icon: mdi:stop
+    on_press:
+      - lambda: |-
+          id(desk_height)->stop();
+          id(is_moving) = false;
+          id(current_command) = "";
+
+  - platform: template
+    name: "Desk ${desk_id} Preset 1"
+    icon: mdi:numeric-1-box
+    on_press:
+      - lambda: |-
+          id(desk_height)->preset(1);
+          id(is_moving) = true;
+          id(current_command) = "PRESET1";
+
+  - platform: template
+    name: "Desk ${desk_id} Preset 2"
+    icon: mdi:numeric-2-box
+    on_press:
+      - lambda: |-
+          id(desk_height)->preset(2);
+          id(is_moving) = true;
+          id(current_command) = "PRESET2";
+
+  - platform: template
+    name: "Desk ${desk_id} Preset 3"
+    icon: mdi:numeric-3-box
+    on_press:
+      - lambda: |-
+          id(desk_height)->preset(3);
+          id(is_moving) = true;
+          id(current_command) = "PRESET3";
+
+  - platform: template
+    name: "Desk ${desk_id} Preset 4"
+    icon: mdi:numeric-4-box
+    on_press:
+      - lambda: |-
+          id(desk_height)->preset(4);
+          id(is_moving) = true;
+          id(current_command) = "PRESET4";
+
+  - platform: restart
+    name: "Desk ${desk_id} Restart"
+
+# Status LED
+status_led:
+  pin: GPIO2

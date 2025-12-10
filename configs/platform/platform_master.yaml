@@ -1,0 +1,366 @@
+# Platform Master Configuration for Synchronized Lift Platform
+# The master ESP32 connects directly to Desk 1 and coordinates all other desks via ESP-NOW
+#
+# Hardware: ESP32 DevKit connected to WN17CM3 desk controller via RJ45
+# Wiring:
+#   RJ45 Pin 2 (Blue)   -> GPIO17 (TX2)
+#   RJ45 Pin 3 (Black)  -> GND
+#   RJ45 Pin 4 (Yellow) -> GPIO16 (RX2)
+#   RJ45 Pin 5 (Red)    -> VIN (5V power from desk)
+
+substitutions:
+  device_name: platform-master
+  # ESP-NOW channel must match slaves
+  espnow_channel: "1"
+
+esphome:
+  name: ${device_name}
+  friendly_name: "Platform Controller"
+  on_boot:
+    priority: 200
+    then:
+      - lambda: |-
+          ESP_LOGI("platform_master", "Platform Master Controller booting...");
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+# WiFi for Home Assistant connection
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: none
+
+  ap:
+    ssid: "${device_name}-fallback"
+    password: "platform12345"
+
+captive_portal:
+
+# Home Assistant API
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+# OTA updates
+ota:
+  platform: esphome
+  password: !secret ota_password
+
+logger:
+  level: DEBUG
+  baud_rate: 0  # Disable serial logging to avoid UART conflicts
+
+# Web server for debugging
+web_server:
+  port: 80
+
+# External components
+external_components:
+  - source:
+      type: local
+      path: ../../components
+    components: [standing_desk_height, platform_sync_controller]
+
+# UART for local desk 1 (master connects directly to one desk)
+uart:
+  id: standing_desk_uart
+  rx_pin: GPIO16
+  tx_pin: GPIO17
+  baud_rate: 19200
+
+# Global variables
+globals:
+  - id: slave_heights
+    type: float[5]
+    restore_value: no
+  - id: last_error_message
+    type: std::string
+    restore_value: no
+    initial_value: '""'
+
+# Local desk 1 height sensor (master's directly connected desk)
+sensor:
+  - platform: standing_desk_height
+    id: desk_1_height
+    name: "Desk 1 Height"
+    unit_of_measurement: "cm"
+    variant: wn17cm3
+    update_interval: 100ms
+    accuracy_decimals: 2
+    on_value:
+      then:
+        - lambda: |-
+            // Report desk 1 height to sync controller
+            id(platform_controller).on_height_received(1, x);
+
+  # Platform sensors (from sync controller)
+  - platform: template
+    name: "Platform Height"
+    id: platform_height
+    unit_of_measurement: "cm"
+    accuracy_decimals: 2
+    lambda: return id(platform_controller).get_platform_height();
+    update_interval: 250ms
+
+  - platform: template
+    name: "Platform Max Spread"
+    id: platform_spread
+    unit_of_measurement: "cm"
+    accuracy_decimals: 2
+    lambda: return id(platform_controller).get_max_spread();
+    update_interval: 250ms
+
+  - platform: template
+    name: "Platform Min Height"
+    id: platform_min_height
+    unit_of_measurement: "cm"
+    accuracy_decimals: 2
+    lambda: return id(platform_controller).get_min_height();
+    update_interval: 250ms
+
+  - platform: template
+    name: "Platform Max Height"
+    id: platform_max_height
+    unit_of_measurement: "cm"
+    accuracy_decimals: 2
+    lambda: return id(platform_controller).get_max_height();
+    update_interval: 250ms
+
+  # Individual desk heights (from ESP-NOW)
+  - platform: template
+    name: "Desk 2 Height"
+    id: desk_2_height_sensor
+    unit_of_measurement: "cm"
+    accuracy_decimals: 2
+    lambda: return id(platform_controller).get_desk_height(2);
+    update_interval: 500ms
+
+  - platform: template
+    name: "Desk 3 Height"
+    id: desk_3_height_sensor
+    unit_of_measurement: "cm"
+    accuracy_decimals: 2
+    lambda: return id(platform_controller).get_desk_height(3);
+    update_interval: 500ms
+
+  - platform: template
+    name: "Desk 4 Height"
+    id: desk_4_height_sensor
+    unit_of_measurement: "cm"
+    accuracy_decimals: 2
+    lambda: return id(platform_controller).get_desk_height(4);
+    update_interval: 500ms
+
+  - platform: template
+    name: "Desk 5 Height"
+    id: desk_5_height_sensor
+    unit_of_measurement: "cm"
+    accuracy_decimals: 2
+    lambda: return id(platform_controller).get_desk_height(5);
+    update_interval: 500ms
+
+  # WiFi signal for debugging
+  - platform: wifi_signal
+    name: "Master WiFi Signal"
+    update_interval: 60s
+
+  # Uptime
+  - platform: uptime
+    name: "Master Uptime"
+    update_interval: 60s
+
+# Platform sync controller component
+platform_sync_controller:
+  id: platform_controller
+  pause_threshold: 0.3      # Pause desk if ahead by 0.3cm
+  resume_threshold: 0.2     # Resume when within 0.2cm of slowest
+  emergency_threshold: 1.0  # Emergency stop if spread > 1.0cm
+  comm_timeout: 250         # Stop if desk doesn't report for 250ms
+  num_desks: 5              # Total desks including master's desk 1
+  control_loop_interval: 50 # Run sync algorithm at ~20Hz
+
+# Binary sensors for status
+binary_sensor:
+  - platform: template
+    name: "Platform Moving"
+    id: platform_moving
+    lambda: return id(platform_controller).is_moving();
+
+  - platform: template
+    name: "Platform Error"
+    id: platform_error
+    device_class: problem
+    lambda: return id(platform_controller).has_error();
+
+  - platform: template
+    name: "All Desks Responding"
+    id: all_desks_ok
+    device_class: connectivity
+    lambda: return id(platform_controller).all_desks_responding();
+
+# Text sensor for error messages
+text_sensor:
+  - platform: template
+    name: "Platform Status"
+    id: platform_status
+    lambda: |-
+      auto state = id(platform_controller).get_platform_state();
+      switch (state) {
+        case platform_sync_controller::PlatformState::IDLE:
+          return std::string("Idle");
+        case platform_sync_controller::PlatformState::MOVING_UP:
+          return std::string("Moving Up");
+        case platform_sync_controller::PlatformState::MOVING_DOWN:
+          return std::string("Moving Down");
+        case platform_sync_controller::PlatformState::MOVING_TO_HEIGHT:
+          return std::string("Moving to Height");
+        case platform_sync_controller::PlatformState::ERROR:
+          return std::string("ERROR");
+        default:
+          return std::string("Unknown");
+      }
+    update_interval: 1s
+
+  - platform: template
+    name: "Platform Error Message"
+    id: platform_error_message
+    lambda: |-
+      return std::string(id(platform_controller).get_error_message());
+    update_interval: 1s
+
+# Platform control buttons
+button:
+  - platform: template
+    name: "Platform Up"
+    icon: mdi:arrow-up-bold
+    on_press:
+      - lambda: id(platform_controller).move_up();
+
+  - platform: template
+    name: "Platform Down"
+    icon: mdi:arrow-down-bold
+    on_press:
+      - lambda: id(platform_controller).move_down();
+
+  - platform: template
+    name: "Platform Stop"
+    icon: mdi:stop
+    on_press:
+      - lambda: id(platform_controller).stop();
+
+  - platform: template
+    name: "Platform Emergency Stop"
+    icon: mdi:alert-octagon
+    on_press:
+      - lambda: id(platform_controller).emergency_stop("Manual emergency stop");
+
+  - platform: template
+    name: "Clear Platform Error"
+    icon: mdi:alert-circle-check
+    on_press:
+      - lambda: id(platform_controller).clear_error();
+
+  - platform: template
+    name: "Platform Preset 1"
+    icon: mdi:numeric-1-box
+    on_press:
+      - lambda: id(platform_controller).preset(1);
+
+  - platform: template
+    name: "Platform Preset 2"
+    icon: mdi:numeric-2-box
+    on_press:
+      - lambda: id(platform_controller).preset(2);
+
+  - platform: template
+    name: "Platform Preset 3"
+    icon: mdi:numeric-3-box
+    on_press:
+      - lambda: id(platform_controller).preset(3);
+
+  - platform: template
+    name: "Platform Preset 4"
+    icon: mdi:numeric-4-box
+    on_press:
+      - lambda: id(platform_controller).preset(4);
+
+  # Local desk 1 controls (for testing without sync)
+  - platform: template
+    name: "Desk 1 Up (Local)"
+    icon: mdi:arrow-up
+    entity_category: diagnostic
+    on_press:
+      - standing_desk_height.move_up: desk_1_height
+      - delay: 100ms
+      - standing_desk_height.stop: desk_1_height
+
+  - platform: template
+    name: "Desk 1 Down (Local)"
+    icon: mdi:arrow-down
+    entity_category: diagnostic
+    on_press:
+      - standing_desk_height.move_down: desk_1_height
+      - delay: 100ms
+      - standing_desk_height.stop: desk_1_height
+
+  - platform: restart
+    name: "Master Restart"
+
+# Target height number input
+number:
+  - platform: template
+    name: "Platform Target Height"
+    id: platform_target
+    unit_of_measurement: "cm"
+    min_value: 60
+    max_value: 125
+    step: 0.5
+    optimistic: true
+    restore_value: true
+    set_action:
+      - lambda: id(platform_controller).move_to_height(x);
+
+# ESP-NOW configuration for slave communication
+# Note: ESP-NOW component required
+# espnow:
+#   id: espnow_component
+#   wifi_channel: ${espnow_channel}
+#   on_receive:
+#     - lambda: |-
+#         // Parse height reports from slaves: "H<id>:<height>"
+#         std::string msg((char*)data, len);
+#         ESP_LOGD("espnow", "Received: %s", msg.c_str());
+#
+#         if (msg[0] == 'H' && msg.length() >= 5) {
+#           // Parse "H2:72.35"
+#           uint8_t desk_id = msg[1] - '0';
+#           size_t colon_pos = msg.find(':');
+#           if (colon_pos != std::string::npos) {
+#             float height = std::stof(msg.substr(colon_pos + 1));
+#             id(platform_controller).on_height_received(desk_id, height);
+#           }
+#         }
+
+# Status LED
+status_led:
+  pin: GPIO2
+
+# Interval for simulated height updates (for testing without ESP-NOW)
+# Remove this when ESP-NOW is configured
+interval:
+  - interval: 500ms
+    then:
+      - lambda: |-
+          // Simulated height updates for testing (remove when ESP-NOW is working)
+          // This simulates all desks at the same height as desk 1
+          float h1 = id(desk_1_height).state;
+          if (!isnan(h1) && h1 > 0) {
+            // Simulate desks 2-5 with slight variations
+            id(platform_controller).on_height_received(2, h1 + 0.05);
+            id(platform_controller).on_height_received(3, h1 - 0.03);
+            id(platform_controller).on_height_received(4, h1 + 0.02);
+            id(platform_controller).on_height_received(5, h1 - 0.01);
+          }
