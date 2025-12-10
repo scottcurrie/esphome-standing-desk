@@ -61,11 +61,12 @@ logger:
   level: DEBUG
   baud_rate: 0  # Disable serial logging to avoid UART conflicts
 
-# External component for desk height sensing
+# External component for desk height sensing (from GitHub fork)
 external_components:
   - source:
-      type: local
-      path: ../../components
+      type: git
+      url: https://github.com/scottcurrie/esphome-standing-desk
+      ref: master
     components: [standing_desk_height]
 
 # UART for desk communication (WN17CM3 @ 19200 baud)

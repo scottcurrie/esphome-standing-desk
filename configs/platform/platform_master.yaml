@@ -57,11 +57,12 @@ logger:
 web_server:
   port: 80
 
-# External components
+# External components (from GitHub fork)
 external_components:
   - source:
-      type: local
-      path: ../../components
+      type: git
+      url: https://github.com/scottcurrie/esphome-standing-desk
+      ref: master
     components: [standing_desk_height, platform_sync_controller]
 
 # UART for local desk 1 (master connects directly to one desk)
