@@ -101,3 +101,25 @@ button:
       - standing_desk_height.preset:
           id: desk_height
           preset: 4
+
+# Switches for hold-to-move control (use with Lovelace button-card hold_action)
+switch:
+  - platform: template
+    name: "Desk Move Up"
+    id: desk_move_up
+    icon: mdi:arrow-up-bold
+    optimistic: true
+    turn_on_action:
+      - standing_desk_height.move_up: desk_height
+    turn_off_action:
+      - standing_desk_height.stop: desk_height
+
+  - platform: template
+    name: "Desk Move Down"
+    id: desk_move_down
+    icon: mdi:arrow-down-bold
+    optimistic: true
+    turn_on_action:
+      - standing_desk_height.move_down: desk_height
+    turn_off_action:
+      - standing_desk_height.stop: desk_height

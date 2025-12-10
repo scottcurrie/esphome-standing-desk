@@ -144,6 +144,7 @@ bool Wn17cm3Decoder::parse_display_command() {
 
   last_height_ = height;
   ESP_LOGD(TAG, "Decoded height: %.1f cm", height);
+  send_ack();  // Acknowledge the display command (required by protocol)
   return true;
 }
 
@@ -181,6 +182,11 @@ void Wn17cm3Decoder::send_key_released(const char *key) {
   char cmd[8];
   snprintf(cmd, sizeof(cmd), "K%sB", key);
   send_command(cmd);
+}
+
+void Wn17cm3Decoder::send_ack() {
+  // Send ACK response to controller (required by protocol)
+  send_command("A");
 }
 
 }  // namespace standing_desk_height

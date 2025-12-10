@@ -25,6 +25,7 @@ class Wn17cm3Decoder : public Decoder {
   // Command sending methods
   void send_key_pressed(const char *key);
   void send_key_released(const char *key);
+  void send_ack();
 
  protected:
   uart::UARTDevice *uart_{nullptr};

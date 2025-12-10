@@ -30,7 +30,7 @@ substitutions:
   desk_height_name: "Desk Height"
   target_desk_height_name: "Target Desk Height"
   standing_desk_height_units: "in"
-  standing_desk_variant: "auto" # jarvis, uplift, or omnidesk
+  standing_desk_variant: "auto" # jarvis, uplift, omnidesk, or wn17cm3
 ```
 
 This will expose two entities:
@@ -57,6 +57,8 @@ sensor:
 ```
 
 By default, the component will report the height as inches, but if your desk reports its height in centimeters, you can simply set `units_of_measurement` to `"cm"` in the config like any other sensor.
+
+**Note for WN17CM3/WN17CM2 desks:** These controllers use 19200 baud (instead of 9600) and support UART-based control, eliminating the need for GPIO pins for up/down movement. Use `template_wn17cm3.yaml` instead of `template.yaml` for these desks. See the [desk configs](configs/desks/README.md) for details.
 
 ### Addons
 
