@@ -23,6 +23,14 @@ both as a single standalone desk and as the 5-desk synchronized platform
 | 4   | Yellow                  | TX (controller sends) |
 | 5   | Red                     | 5V |
 
+> **MANDATORY before first power-up of each board+cable pair:** find GND/5V
+> empirically with a multimeter at the breakout (probe free breadboard holes in
+> the breakout's rows, never adjacent header pins). Breakout silk numbering
+> and self-crimped cables can shift the mapping — the 2026-07-27 smoke test
+> measured the whole pinout shifted one position (5V on breakout "4", GND on
+> "2"), so the table above is the desk-side truth, not necessarily what the
+> breakout labels say. Wire to the measured positions.
+
 ### Connections to ESP32
 
 ```

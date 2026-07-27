@@ -16,7 +16,7 @@ substitutions:
   # Note: ESP-NOW inherits the WiFi channel in ESPHome 2025.11 (channel: is
   # rejected when wifi: is configured) — ensure all five boards associate to the
   # same AP/channel (pin the AP channel on mesh/multi-AP networks).
-  desk_2_mac: "00:00:00:00:00:02"
+  desk_2_mac: "4C:C3:82:0D:16:C4"  # board flashed 2026-07-27 (smoke test slave)
   desk_3_mac: "00:00:00:00:00:03"
   desk_4_mac: "00:00:00:00:00:04"
   desk_5_mac: "00:00:00:00:00:05"
@@ -130,6 +130,11 @@ sensor:
     id: desk_1_height
     name: "Desk 1 Height"
     unit_of_measurement: "cm"
+    # This desk model reports INCHES over UART (verified on hardware
+    # 2026-07-27). Convert to cm so desk 1 heights match the slaves' reports
+    # and the sync controller's cm-based thresholds.
+    filters:
+      - multiply: 2.54
     variant: wn17cm3
     update_interval: 100ms
     accuracy_decimals: 2
@@ -228,7 +233,8 @@ platform_sync_controller:
   resume_threshold: 0.2     # Resume when within 0.2cm of slowest
   emergency_threshold: 1.0  # Emergency stop if spread > 1.0cm
   comm_timeout: 250         # Stop if desk doesn't report for 250ms
-  num_desks: 5              # Total desks including master's desk 1.
+  num_desks: 2              # SMOKE TEST: master + desk 2 only. Restore to 5 for
+                            # the full platform. Total desks including master's desk 1.
                             # Set to 2 or 3 for the first bench sync test — the master
                             # refuses ALL movement until every desk 1..num_desks reports
                             # within comm_timeout. Slaves must use contiguous desk_ids
@@ -387,9 +393,11 @@ espnow:
   # on_receive only fires for registered peers — the slave MACs must be correct
   peers:
     - ${desk_2_mac}
-    - ${desk_3_mac}
-    - ${desk_4_mac}
-    - ${desk_5_mac}
+    # SMOKE TEST: desks 3-5 not built out yet — placeholder MACs must not be
+    # registered as peers. Uncomment when those boards exist.
+    # - ${desk_3_mac}
+    # - ${desk_4_mac}
+    # - ${desk_5_mac}
   on_receive:
     - lambda: |-
         // Parse height reports from slaves: "H<id>:<height>"
