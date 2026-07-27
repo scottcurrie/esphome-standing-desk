@@ -1,5 +1,6 @@
 .esphome/
-/secrets.yaml
+secrets.yaml
 __pycache__
 configs/test.yaml
 .vscode
+.DS_Store
