@@ -16,7 +16,7 @@ substitutions:
   # Note: ESP-NOW inherits the WiFi channel in ESPHome 2025.11 (channel: is
   # rejected when wifi: is configured) — ensure all five boards associate to the
   # same AP/channel (pin the AP channel on mesh/multi-AP networks).
-  desk_2_mac: "4C:C3:82:0D:16:C4"  # board flashed 2026-07-27 (smoke test slave)
+  desk_2_mac: "4C:C3:82:0B:EF:84"  # ROLE SWAP 2026-07-27: board 2 is now the slave
   desk_3_mac: "00:00:00:00:00:03"
   desk_4_mac: "00:00:00:00:00:04"
   desk_5_mac: "00:00:00:00:00:05"
@@ -69,9 +69,23 @@ esphome:
               }
               macs_parsed = true;
             }
-            // Queued, non-blocking send — safe to call from the 20Hz control loop
+            // Queued, non-blocking send — safe to call from the 20Hz control loop.
+            // The callback is REQUIRED, not optional: espnow in ESPHome 2025.11.5
+            // invokes it on send completion WITHOUT a null check, so the default
+            // nullptr callback crashes the firmware on the first completed send
+            // (verified on hardware 2026-07-27).
             id(espnow_component)->send(desk_macs[desk_id - 2],
-                                       reinterpret_cast<const uint8_t *>(cmd), strlen(cmd));
+                                       reinterpret_cast<const uint8_t *>(cmd), strlen(cmd),
+                                       [](esp_err_t status) {
+                                         static uint32_t last_warn = 0;
+                                         if (status != ESP_OK && millis() - last_warn > 2000) {
+                                           last_warn = millis();
+                                           ESP_LOGW("platform_master",
+                                                    "ESP-NOW command send failing (status %d) - "
+                                                    "slave offline or on another WiFi channel?",
+                                                    (int) status);
+                                         }
+                                       });
           });
 
 esp32:
@@ -102,7 +116,7 @@ ota:
   password: !secret ota_password
 
 logger:
-  level: DEBUG
+  level: VERBOSE  # TEMP (2026-07-27): diagnosing espnow RX path; restore to DEBUG
   # Serial (USB) logging stays enabled: the desk UART is on GPIO16/17 (UART2),
   # which does not conflict with UART0 logging on ESP32
 
@@ -398,6 +412,13 @@ espnow:
     # - ${desk_3_mac}
     # - ${desk_4_mac}
     # - ${desk_5_mac}
+  # TEMP (2026-07-27): trap for frames arriving from unregistered senders —
+  # they are dropped silently before on_receive, even at VERBOSE
+  on_unknown_peer:
+    - lambda: |-
+        ESP_LOGW("espnow", "Frame from UNREGISTERED peer %02X:%02X:%02X:%02X:%02X:%02X (%d bytes)",
+                 info.src_addr[0], info.src_addr[1], info.src_addr[2],
+                 info.src_addr[3], info.src_addr[4], info.src_addr[5], size);
   on_receive:
     - lambda: |-
         // Parse height reports from slaves: "H<id>:<height>"

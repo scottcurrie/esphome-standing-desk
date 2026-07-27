@@ -498,12 +498,22 @@ bool PlatformSyncController::all_desks_responding() const {
 
   for (uint8_t i = 1; i <= num_desks_; i++) {
     if (last_update_[i - 1] == 0) {
-      ESP_LOGW(TAG, "Desk %d has never reported", i);
+      // Rate-limited: polled at sensor/control-loop frequency; unthrottled this
+      // flooded the logger at 60+ lines/sec on hardware (2026-07-27)
+      static uint32_t last_never_log = 0;
+      if (now - last_never_log > 5000) {
+        last_never_log = now;
+        ESP_LOGW(TAG, "Desk %d has never reported", i);
+      }
       return false;
     }
     if (now - last_update_[i - 1] > comm_timeout_) {
-      ESP_LOGW(TAG, "Desk %d last reported %d ms ago (timeout %d ms)",
-               i, now - last_update_[i - 1], comm_timeout_);
+      static uint32_t last_stale_log = 0;
+      if (now - last_stale_log > 5000) {
+        last_stale_log = now;
+        ESP_LOGW(TAG, "Desk %d last reported %d ms ago (timeout %d ms)",
+                 i, now - last_update_[i - 1], comm_timeout_);
+      }
       return false;
     }
   }

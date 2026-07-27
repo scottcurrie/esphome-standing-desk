@@ -26,7 +26,7 @@ substitutions:
   # Note: ESP-NOW inherits the WiFi channel in ESPHome 2025.11 (channel: is
   # rejected when wifi: is configured) — ensure all five boards associate to the
   # same AP/channel (pin the AP channel on mesh/multi-AP networks).
-  master_mac: "00:00:00:00:00:01"
+  master_mac: "4C:C3:82:0D:16:C4"  # ROLE SWAP 2026-07-27: board 1 is now the master
 
 esphome:
   name: ${device_name}
@@ -144,8 +144,6 @@ sensor:
               snprintf(msg, sizeof(msg), "H${desk_id}:%.2f", height);
 
               if (std::string("${standalone_mode}") != "true") {
-                // Unicast to the master. The send is queued (non-blocking), so it
-                // is safe to call from this 100ms sensor callback.
                 static uint8_t master_mac[6];
                 static bool mac_parsed = false;
                 if (!mac_parsed) {
@@ -156,8 +154,23 @@ sensor:
                     master_mac[i] = (uint8_t) b[i];
                   mac_parsed = true;
                 }
+                // The callback is REQUIRED, not optional: espnow in ESPHome
+                // 2025.11.5 invokes the callback on send completion WITHOUT a
+                // null check, so the default nullptr callback crashes the
+                // firmware on the first completed send (verified on hardware
+                // 2026-07-27; boards crash-looped into safe mode).
                 id(espnow_component)->send(master_mac,
-                    reinterpret_cast<const uint8_t *>(msg), strlen(msg));
+                    reinterpret_cast<const uint8_t *>(msg), strlen(msg),
+                    [](esp_err_t status) {
+                      static uint32_t last_warn = 0;
+                      if (status != ESP_OK && millis() - last_warn > 5000) {
+                        last_warn = millis();
+                        ESP_LOGW("platform_slave",
+                                 "ESP-NOW height report failing (status %d) - "
+                                 "master offline or on another WiFi channel "
+                                 "(mesh nodes)?", (int) status);
+                      }
+                    });
               }
             }
 
