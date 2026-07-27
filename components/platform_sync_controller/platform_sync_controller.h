@@ -2,8 +2,10 @@
 
 #include "esphome/core/component.h"
 #include "esphome/core/automation.h"
+#include "esphome/components/standing_desk_height/standing_desk_height.h"
 #include <cstring>
 #include <cmath>
+#include <functional>
 
 namespace esphome {
 namespace platform_sync_controller {
@@ -73,6 +75,23 @@ class PlatformSyncController : public Component {
   void set_comm_timeout(uint32_t t) { comm_timeout_ = t; }
   void set_num_desks(uint8_t n) { num_desks_ = n; }
   void set_control_loop_interval(uint32_t ms) { control_loop_interval_ = ms; }
+  void set_target_tolerance(float t) { target_tolerance_ = t; }
+
+  // Directly attached desk (desk 1 on the master). When set, commands for
+  // desk 1 are driven over the local UART instead of the transport callback,
+  // and emergency_stop() always stops it even if the transport is down.
+  void set_local_desk_sensor(standing_desk_height::StandingDeskHeightSensor *sensor) {
+    local_desk_sensor_ = sensor;
+  }
+
+  // Transport hooks (e.g. ESP-NOW, wired from YAML lambdas). Without these,
+  // commands for remote desks are dropped with a warning.
+  void set_send_callback(std::function<void(uint8_t desk_id, const char *cmd)> cb) {
+    send_callback_ = std::move(cb);
+  }
+  void set_broadcast_callback(std::function<void(const char *cmd)> cb) {
+    broadcast_callback_ = std::move(cb);
+  }
 
   // Control methods (called from Home Assistant or automation)
   void move_up();
@@ -98,6 +117,12 @@ class PlatformSyncController : public Component {
   // Check if all desks are reporting (for startup check)
   bool all_desks_responding() const;
 
+  // Pre-move health check: every desk must have reported at least once and not
+  // too long ago. Deliberately looser than the strict comm_timeout watchdog,
+  // because the WN17CM3 is silent at idle (no D frames until a display session
+  // is active), so 250ms-fresh data cannot exist before movement starts.
+  bool all_desks_have_reported() const;
+
   // Get desk state for diagnostics
   DeskState get_desk_state(uint8_t desk_id) const;
   float get_desk_height(uint8_t desk_id) const;
@@ -110,9 +135,22 @@ class PlatformSyncController : public Component {
   float pause_threshold_{0.3f};      // Pause desk if ahead by this much (cm)
   float resume_threshold_{0.2f};     // Resume when within this of slowest (cm)
   float emergency_threshold_{1.0f};  // Emergency stop if spread exceeds this (cm)
+  float target_tolerance_{0.3f};     // Per-desk stop tolerance for move_to_height (cm)
   uint32_t comm_timeout_{250};       // Stop all if any desk stops reporting (ms)
   uint8_t num_desks_{5};             // Number of desks in platform
   uint32_t control_loop_interval_{50}; // Control loop interval (ms) - ~20Hz
+
+  // Desk ID of the desk wired directly to this board
+  static constexpr uint8_t LOCAL_DESK_ID = 1;
+  // Grace period after movement starts before the strict comm_timeout watchdog
+  // applies (the D-frame stream only starts once the display session wakes up)
+  static constexpr uint32_t MOVE_START_GRACE_MS = 1000;
+  // Maximum height-report age accepted by the pre-move health check
+  static constexpr uint32_t PRE_MOVE_MAX_AGE_MS = 5000;
+  // Cadence for re-sending the active direction to MOVING desks. 100ms is the
+  // hardware-proven WN17CM3 re-send interval (Dec 13 finding: timing changes
+  // caused start/stop stutter, so stay on the proven cadence)
+  static constexpr uint32_t KEEPALIVE_INTERVAL_MS = 100;
 
   // State tracking
   float heights_[MAX_DESKS];         // Last known height of each desk (1-indexed: 1..num_desks)
@@ -125,11 +163,20 @@ class PlatformSyncController : public Component {
 
   // Timing
   uint32_t last_control_loop_{0};
+  uint32_t movement_started_at_{0};
+  uint32_t last_keepalive_{0};
+  uint32_t last_no_transport_warn_{0};
+
+  // Local desk + transport
+  standing_desk_height::StandingDeskHeightSensor *local_desk_sensor_{nullptr};
+  std::function<void(uint8_t desk_id, const char *cmd)> send_callback_{nullptr};
+  std::function<void(const char *cmd)> broadcast_callback_{nullptr};
 
   // Internal methods
   void run_control_loop();
   void send_command_to_desk(uint8_t desk_id, const char *cmd);
   void broadcast_command(const char *cmd);
+  void apply_local_command(const char *cmd);
   void start_movement(Direction dir);
   void stop_all_desks();
 

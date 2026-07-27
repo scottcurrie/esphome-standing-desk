@@ -14,11 +14,19 @@
 #   RJ45 Pin 5 (Red)    -> VIN (5V power from desk)
 
 substitutions:
-  desk_id: "2"  # Change for each slave: 2, 3, 4, 5
+  # desk_id MUST be edited before flashing each board (2, 3, 4, or 5).
+  # A duplicate desk_id produces a duplicate hostname (platform-desk-N), so
+  # mDNS/OTA can target the wrong board.
+  desk_id: "2"
   device_name: platform-desk-${desk_id}
   standalone_mode: "false"  # Set "true" for individual desk testing without master
-  # ESP-NOW channel must match master
-  espnow_channel: "1"
+  # MAC address of the master board (WiFi STA MAC, printed in its boot log).
+  # REPLACE this placeholder before flashing — height reports are unicast to it,
+  # and on_receive only fires for registered peers.
+  # Note: ESP-NOW inherits the WiFi channel in ESPHome 2025.11 (channel: is
+  # rejected when wifi: is configured) — ensure all five boards associate to the
+  # same AP/channel (pin the AP channel on mesh/multi-AP networks).
+  master_mac: "00:00:00:00:00:01"
 
 esphome:
   name: ${device_name}
@@ -29,7 +37,7 @@ esphome:
       - lambda: |-
           ESP_LOGI("platform_slave", "===========================================");
           ESP_LOGI("platform_slave", "Platform Desk ${desk_id} booting...");
-          ESP_LOGI("platform_slave", "Firmware version: 2024-12-13-local-component");
+          ESP_LOGI("platform_slave", "Firmware version: 2025-12-13-local-component/slave");
           ESP_LOGI("platform_slave", "UART RX: GPIO16, TX: GPIO17");
           ESP_LOGI("platform_slave", "Standalone mode: ${standalone_mode}");
           ESP_LOGI("platform_slave", "===========================================");
@@ -63,7 +71,8 @@ ota:
 
 logger:
   level: DEBUG
-  baud_rate: 0  # Disable serial logging to avoid UART conflicts
+  # Serial (USB) logging stays enabled: the desk UART is on GPIO16/17 (UART2),
+  # which does not conflict with UART0 logging on ESP32
 
 # External component for desk height sensing (local development)
 external_components:
@@ -124,12 +133,22 @@ sensor:
               char msg[16];
               snprintf(msg, sizeof(msg), "H${desk_id}:%.2f", height);
 
-              #ifdef USE_ESPNOW
               if (std::string("${standalone_mode}") != "true") {
-                // id(espnow_component).broadcast(msg);
-                ESP_LOGD("platform_slave", "Would send: %s", msg);
+                // Unicast to the master. The send is queued (non-blocking), so it
+                // is safe to call from this 100ms sensor callback.
+                static uint8_t master_mac[6];
+                static bool mac_parsed = false;
+                if (!mac_parsed) {
+                  unsigned int b[6] = {0};
+                  sscanf("${master_mac}", "%x:%x:%x:%x:%x:%x",
+                         &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]);
+                  for (int i = 0; i < 6; i++)
+                    master_mac[i] = (uint8_t) b[i];
+                  mac_parsed = true;
+                }
+                id(espnow_component)->send(master_mac,
+                    reinterpret_cast<const uint8_t *>(msg), strlen(msg));
               }
-              #endif
             }
 
   # WiFi signal for debugging
@@ -161,79 +180,71 @@ text_sensor:
       return std::string("idle");
     update_interval: 1s
 
-# ESP-NOW configuration (disabled in standalone mode)
-# Note: ESP-NOW component must be available in ESPHome
-# espnow:
-#   id: espnow_component
-#   wifi_channel: ${espnow_channel}
-#   on_receive:
-#     - lambda: |-
-#         std::string cmd((char*)data, len);
-#         ESP_LOGD("platform_slave", "Received command: %s", cmd.c_str());
-#
-#         // Handle individual commands (no prefix) or broadcast (*prefix)
-#         bool is_broadcast = cmd[0] == '*';
-#         std::string actual_cmd = is_broadcast ? cmd.substr(1) : cmd;
-#
-#         if (actual_cmd == "U") {
-#           id(desk_height)->move_up();
-#           id(is_moving) = true;
-#           id(current_command) = "UP";
-#         } else if (actual_cmd == "D") {
-#           id(desk_height)->move_down();
-#           id(is_moving) = true;
-#           id(current_command) = "DOWN";
-#         } else if (actual_cmd == "S") {
-#           id(desk_height)->stop();
-#           id(is_moving) = false;
-#           id(current_command) = "";
-#         } else if (actual_cmd == "P1") {
-#           id(desk_height)->preset(1);
-#           id(is_moving) = true;
-#           id(current_command) = "PRESET1";
-#         } else if (actual_cmd == "P2") {
-#           id(desk_height)->preset(2);
-#           id(is_moving) = true;
-#           id(current_command) = "PRESET2";
-#         } else if (actual_cmd == "P3") {
-#           id(desk_height)->preset(3);
-#           id(is_moving) = true;
-#           id(current_command) = "PRESET3";
-#         } else if (actual_cmd == "P4") {
-#           id(desk_height)->preset(4);
-#           id(is_moving) = true;
-#           id(current_command) = "PRESET4";
-#         }
+# ESP-NOW link to the master.
+# ESP-NOW inherits the WiFi channel in ESPHome 2025.11 (channel: is rejected when
+# wifi: is configured) — ensure all five boards associate to the same AP/channel.
+espnow:
+  id: espnow_component
+  # on_receive only fires for registered peers — the master MAC must be correct
+  peers:
+    - ${master_mac}
+  on_receive:
+    - lambda: |-
+        std::string cmd(reinterpret_cast<const char *>(data), size);
+        ESP_LOGD("platform_slave", "Received command: %s", cmd.c_str());
+
+        // Handle individual commands (no prefix) or broadcast (*prefix)
+        bool is_broadcast = !cmd.empty() && cmd[0] == '*';
+        std::string actual_cmd = is_broadcast ? cmd.substr(1) : cmd;
+
+        if (actual_cmd == "U") {
+          // Latch direction via the hold switch — the 100ms interval below
+          // re-sends move_up while it is on (a single command only nudges
+          // the desk; Dec 13 hardware finding)
+          if (id(desk_move_down).state)
+            id(desk_move_down).turn_off();
+          id(desk_move_up).turn_on();
+        } else if (actual_cmd == "D") {
+          if (id(desk_move_up).state)
+            id(desk_move_up).turn_off();
+          id(desk_move_down).turn_on();
+        } else if (actual_cmd == "S") {
+          if (id(desk_move_up).state)
+            id(desk_move_up).turn_off();
+          if (id(desk_move_down).state)
+            id(desk_move_down).turn_off();
+          // Always send an explicit stop (covers preset motion too)
+          id(desk_height)->stop();
+          id(is_moving) = false;
+          id(current_command) = "";
+        } else if (actual_cmd.length() == 2 && actual_cmd[0] == 'P' &&
+                   actual_cmd[1] >= '1' && actual_cmd[1] <= '4') {
+          id(desk_height)->preset(actual_cmd[1] - '0');
+          id(is_moving) = true;
+          id(current_command) = std::string("PRESET") + actual_cmd[1];
+        }
 
 # Local control buttons (always available for testing)
+# Up/Down drive the hold switches so the 100ms re-send interval keeps the desk
+# moving — a single move command only nudges the desk (Dec 13 hardware finding).
 button:
   - platform: template
     name: "Desk ${desk_id} Up"
     icon: mdi:arrow-up-bold
+    entity_category: diagnostic
     on_press:
-      - lambda: |-
-          id(desk_height)->move_up();
-          id(is_moving) = true;
-          id(current_command) = "UP";
-      - delay: 100ms
-      - lambda: |-
-          id(desk_height)->stop();
-          id(is_moving) = false;
-          id(current_command) = "";
+      - switch.turn_on: desk_move_up
+      - delay: 500ms
+      - switch.turn_off: desk_move_up
 
   - platform: template
     name: "Desk ${desk_id} Down"
     icon: mdi:arrow-down-bold
+    entity_category: diagnostic
     on_press:
-      - lambda: |-
-          id(desk_height)->move_down();
-          id(is_moving) = true;
-          id(current_command) = "DOWN";
-      - delay: 100ms
-      - lambda: |-
-          id(desk_height)->stop();
-          id(is_moving) = false;
-          id(current_command) = "";
+      - switch.turn_on: desk_move_down
+      - delay: 500ms
+      - switch.turn_off: desk_move_down
 
   - platform: template
     name: "Desk ${desk_id} Stop"

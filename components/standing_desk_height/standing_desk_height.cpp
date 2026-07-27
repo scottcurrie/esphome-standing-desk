@@ -75,6 +75,11 @@ void StandingDeskHeightSensor::setup() {
     const LogString *variant_s = decoder_variant_to_string(this->decoder_variant);
     ESP_LOGD(TAG, "Using hardcoded decoder variant %s", LOG_STR_ARG(variant_s));
   }
+
+  // A real WN17CM3 handset announces itself on connect; do the same
+  if (auto *dec = this->get_wn17cm3_decoder()) {
+    dec->send_boot_banner();
+  }
 }
 
 void StandingDeskHeightSensor::loop() {
@@ -89,6 +94,7 @@ void StandingDeskHeightSensor::loop() {
       float height = this->decoder->decode();
       ESP_LOGVV(TAG, "Got desk height: %f", height);
       this->last_read = height;
+      this->last_frame_at_ = millis();
     }
   }
 
@@ -155,15 +161,30 @@ void StandingDeskHeightSensor::stop() {
   if (auto *dec = get_wn17cm3_decoder()) {
     dec->send_key_released("UA");
     dec->send_key_released("DA");
+    // Also release the memory keys in case a preset key is logically held.
+    // NOTE: do not rely on this to abort an in-flight preset move -- that
+    // likely needs a brief key press+release tap (unverified on hardware).
+    dec->send_key_released(" 1");
+    dec->send_key_released(" 2");
+    dec->send_key_released(" 3");
+    dec->send_key_released(" 4");
   }
 }
 
 void StandingDeskHeightSensor::preset(uint8_t num) {
   if (auto *dec = get_wn17cm3_decoder()) {
     // Keys are " 1", " 2", " 3", " 4" (space prefix)
-    const char *keys[] = {" 1", " 2", " 3", " 4"};
+    static const char *keys[] = {" 1", " 2", " 3", " 4"};
     if (num >= 1 && num <= 4) {
-      dec->send_key_pressed(keys[num - 1]);
+      const char *key = keys[num - 1];
+      dec->send_key_pressed(key);
+      // Release the key ~100ms later, mirroring a physical tap; a press with
+      // no matching release leaves the key logically held forever
+      this->set_timeout("preset_key_release", 100, [this, key]() {
+        if (auto *d = this->get_wn17cm3_decoder()) {
+          d->send_key_released(key);
+        }
+      });
     }
   }
 }

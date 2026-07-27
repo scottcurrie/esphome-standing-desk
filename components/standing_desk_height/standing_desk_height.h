@@ -27,6 +27,11 @@ public:
   void dump_config() override;
   float get_last_read();
 
+  // millis() timestamp of the last successfully decoded height frame (0 = never).
+  // Lets callers separate "frames are arriving" (liveness) from "value changed"
+  // (on_value), since identical repeated frames never publish a new state.
+  uint32_t get_last_frame_millis() { return this->last_frame_at_; }
+
   // UART control methods (for WN17CM3)
   void move_up();
   void move_down();
@@ -40,6 +45,7 @@ protected:
 
   float last_read = -1;
   float last_published = -1;
+  uint32_t last_frame_at_ = 0;
 
   bool is_detecting = false;
   uint32_t started_detecting_at = 0;

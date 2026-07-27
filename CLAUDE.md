@@ -31,7 +31,7 @@ The component follows ESPHome's external component structure:
 
 ## Development Notes
 
-- Target platform: ESP8266 (d1_mini board), though ESP32 may work
-- UART baud rate: 9600 for all supported desks
+- Target platform: ESP8266 (d1_mini board) for the original templates; the platform configs in `configs/platform/` target ESP32
+- UART baud rate: 9600 for jarvis/uplift/omnidesk; 19200 for wn17cm3/wn17cm2
 - Height units: inches by default, configurable to cm
 - The component uses polling (default 500ms) to read UART data

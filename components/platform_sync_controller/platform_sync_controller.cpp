@@ -12,6 +12,7 @@ void PlatformSyncController::setup() {
   ESP_LOGI(TAG, "  Pause threshold: %.2f cm", pause_threshold_);
   ESP_LOGI(TAG, "  Resume threshold: %.2f cm", resume_threshold_);
   ESP_LOGI(TAG, "  Emergency threshold: %.2f cm", emergency_threshold_);
+  ESP_LOGI(TAG, "  Target tolerance: %.2f cm", target_tolerance_);
   ESP_LOGI(TAG, "  Communication timeout: %d ms", comm_timeout_);
   ESP_LOGI(TAG, "  Control loop interval: %d ms", control_loop_interval_);
 }
@@ -22,8 +23,10 @@ void PlatformSyncController::dump_config() {
   ESP_LOGCONFIG(TAG, "  Pause threshold: %.2f cm", pause_threshold_);
   ESP_LOGCONFIG(TAG, "  Resume threshold: %.2f cm", resume_threshold_);
   ESP_LOGCONFIG(TAG, "  Emergency threshold: %.2f cm", emergency_threshold_);
+  ESP_LOGCONFIG(TAG, "  Target tolerance: %.2f cm", target_tolerance_);
   ESP_LOGCONFIG(TAG, "  Communication timeout: %d ms", comm_timeout_);
   ESP_LOGCONFIG(TAG, "  Control loop interval: %d ms", control_loop_interval_);
+  ESP_LOGCONFIG(TAG, "  Local desk sensor: %s", local_desk_sensor_ != nullptr ? "yes (desk 1)" : "no");
 }
 
 void PlatformSyncController::loop() {
@@ -44,17 +47,23 @@ void PlatformSyncController::run_control_loop() {
 
   uint32_t now = millis();
 
-  // Step 2: Check for communication failures
-  for (uint8_t i = 1; i <= num_desks_; i++) {
-    if (last_update_[i - 1] == 0) {
-      // Desk hasn't reported yet - this is handled by startup check
-      continue;
-    }
-    if (now - last_update_[i - 1] > comm_timeout_) {
-      char msg[64];
-      snprintf(msg, sizeof(msg), "Desk %d communication lost (timeout %dms)", i, comm_timeout_);
-      emergency_stop(msg);
-      return;
+  // Step 2: Check for communication failures.
+  // The WN17CM3 is silent at idle: D frames only start streaming once the
+  // display session wakes up, so give the stream a short grace period after
+  // movement starts before enforcing the strict comm timeout. The spread
+  // check below still runs during the grace period using last-known heights.
+  if (now - movement_started_at_ > MOVE_START_GRACE_MS) {
+    for (uint8_t i = 1; i <= num_desks_; i++) {
+      if (last_update_[i - 1] == 0) {
+        // Desk hasn't reported yet - this is handled by startup check
+        continue;
+      }
+      if (now - last_update_[i - 1] > comm_timeout_) {
+        char msg[64];
+        snprintf(msg, sizeof(msg), "Desk %d communication lost (timeout %dms)", i, comm_timeout_);
+        emergency_stop(msg);
+        return;
+      }
     }
   }
 
@@ -72,6 +81,31 @@ void PlatformSyncController::run_control_loop() {
     return;
   }
 
+  // Reference heights for the pause/resume logic (steps 5-6). When moving to
+  // a target, desks that already stopped at the target no longer move and
+  // must not throttle the stragglers still chasing it, so use the min/max of
+  // the still-active (MOVING/PAUSED) desks only. The emergency spread check
+  // above intentionally keeps using ALL desks.
+  float ref_min = min_height;
+  float ref_max = max_height;
+  if (platform_state_ == PlatformState::MOVING_TO_HEIGHT) {
+    float active_min = 999999;
+    float active_max = 0;
+    bool found_active = false;
+    for (uint8_t i = 1; i <= num_desks_; i++) {
+      DeskState state = desk_state_[i - 1];
+      if ((state == DeskState::MOVING || state == DeskState::PAUSED) && heights_[i - 1] > 0) {
+        if (heights_[i - 1] < active_min) active_min = heights_[i - 1];
+        if (heights_[i - 1] > active_max) active_max = heights_[i - 1];
+        found_active = true;
+      }
+    }
+    if (found_active) {
+      ref_min = active_min;
+      ref_max = active_max;
+    }
+  }
+
   // Step 5: Throttle fast desks (pause if ahead of slowest by pause_threshold)
   for (uint8_t i = 1; i <= num_desks_; i++) {
     if (desk_state_[i - 1] == DeskState::MOVING) {
@@ -80,15 +114,15 @@ void PlatformSyncController::run_control_loop() {
 
       if (direction_ == Direction::UP) {
         // When moving up, pause desks that are higher than min + threshold
-        should_pause = desk_height > min_height + pause_threshold_;
+        should_pause = desk_height > ref_min + pause_threshold_;
       } else if (direction_ == Direction::DOWN) {
         // When moving down, pause desks that are lower than max - threshold
-        should_pause = desk_height < max_height - pause_threshold_;
+        should_pause = desk_height < ref_max - pause_threshold_;
       }
 
       if (should_pause) {
         ESP_LOGD(TAG, "Pausing desk %d (height %.2f, min %.2f, max %.2f)",
-                 i, desk_height, min_height, max_height);
+                 i, desk_height, ref_min, ref_max);
         send_command_to_desk(i, "S");
         desk_state_[i - 1] = DeskState::PAUSED;
       }
@@ -103,10 +137,10 @@ void PlatformSyncController::run_control_loop() {
 
       if (direction_ == Direction::UP) {
         // Resume when within resume_threshold of minimum
-        should_resume = desk_height <= min_height + resume_threshold_;
+        should_resume = desk_height <= ref_min + resume_threshold_;
       } else if (direction_ == Direction::DOWN) {
         // Resume when within resume_threshold of maximum
-        should_resume = desk_height >= max_height - resume_threshold_;
+        should_resume = desk_height >= ref_max - resume_threshold_;
       }
 
       if (should_resume) {
@@ -121,21 +155,57 @@ void PlatformSyncController::run_control_loop() {
     }
   }
 
-  // Step 7: Check completion (for move_to_height)
-  if (platform_state_ == PlatformState::MOVING_TO_HEIGHT) {
-    float platform_height = get_platform_height();
-    float target_tolerance = 0.3f;  // Complete when within 0.3cm of target
+  // Step 6.5: Keepalive - re-send the active direction to every MOVING desk.
+  // The WN17CM3 only keeps moving while the key-pressed frame is re-sent
+  // continuously (~100ms cadence; Dec 13 hardware finding), and the periodic
+  // re-send also self-heals lost packets and feeds the slaves' dead-man
+  // timers. Pause/stop remain transition-based ("S" above).
+  if ((direction_ == Direction::UP || direction_ == Direction::DOWN) &&
+      now - last_keepalive_ >= KEEPALIVE_INTERVAL_MS) {
+    last_keepalive_ = now;
+    const char *dir_cmd = (direction_ == Direction::UP) ? "U" : "D";
+    for (uint8_t i = 1; i <= num_desks_; i++) {
+      if (desk_state_[i - 1] == DeskState::MOVING) {
+        send_command_to_desk(i, dir_cmd);
+      }
+    }
+  }
 
-    bool reached_target = false;
-    if (direction_ == Direction::UP) {
-      reached_target = platform_height >= target_height_ - target_tolerance;
-    } else if (direction_ == Direction::DOWN) {
-      reached_target = platform_height <= target_height_ + target_tolerance;
+  // Step 7: Check completion (for move_to_height).
+  // Per-desk, direction-aware stops: each desk stops individually as it
+  // reaches the target, so the platform cannot "arrive" tilted on an average.
+  // One-sided tests (not fabs) so an overshooting desk still counts as done.
+  if (platform_state_ == PlatformState::MOVING_TO_HEIGHT) {
+    bool all_stopped = true;
+
+    for (uint8_t i = 1; i <= num_desks_; i++) {
+      DeskState state = desk_state_[i - 1];
+      if (state != DeskState::MOVING && state != DeskState::PAUSED) {
+        continue;
+      }
+
+      float desk_height = heights_[i - 1];
+      bool at_target = false;
+      if (direction_ == Direction::UP) {
+        at_target = desk_height >= target_height_ - target_tolerance_;
+      } else if (direction_ == Direction::DOWN) {
+        at_target = desk_height <= target_height_ + target_tolerance_;
+      }
+
+      if (at_target) {
+        ESP_LOGD(TAG, "Desk %d reached target %.2f (height %.2f); stopping it",
+                 i, target_height_, desk_height);
+        send_command_to_desk(i, "S");
+        desk_state_[i - 1] = DeskState::STOPPED;
+      } else {
+        all_stopped = false;
+      }
     }
 
-    if (reached_target) {
-      ESP_LOGI(TAG, "Target height %.2f reached (current %.2f)", target_height_, platform_height);
-      stop();
+    if (all_stopped) {
+      ESP_LOGI(TAG, "Target height %.2f reached by all desks", target_height_);
+      platform_state_ = PlatformState::IDLE;
+      direction_ = Direction::NONE;
     }
   }
 }
@@ -158,8 +228,8 @@ void PlatformSyncController::move_up() {
     return;
   }
 
-  if (!all_desks_responding()) {
-    ESP_LOGW(TAG, "Cannot move: not all desks responding");
+  if (!all_desks_have_reported()) {
+    ESP_LOGW(TAG, "Cannot move: not all desks have reported a recent height");
     return;
   }
 
@@ -174,8 +244,8 @@ void PlatformSyncController::move_down() {
     return;
   }
 
-  if (!all_desks_responding()) {
-    ESP_LOGW(TAG, "Cannot move: not all desks responding");
+  if (!all_desks_have_reported()) {
+    ESP_LOGW(TAG, "Cannot move: not all desks have reported a recent height");
     return;
   }
 
@@ -194,11 +264,21 @@ void PlatformSyncController::stop() {
 void PlatformSyncController::emergency_stop(const char *reason) {
   ESP_LOGE(TAG, "EMERGENCY STOP: %s", reason);
 
+  // Stop the directly attached desk first - this path involves no transport
+  // and must work even if ESP-NOW is down
+  if (local_desk_sensor_ != nullptr) {
+    local_desk_sensor_->stop();
+  }
+
   // Broadcast stop to all desks immediately
   broadcast_command("*S");
 
-  // Stop local desk if applicable
-  stop_all_desks();
+  // Belt and suspenders: ESP-NOW broadcast has no MAC-layer ACK/retry, so
+  // also unicast a stop to every desk individually
+  for (uint8_t i = 1; i <= num_desks_; i++) {
+    send_command_to_desk(i, "S");
+    desk_state_[i - 1] = DeskState::STOPPED;
+  }
 
   // Set error state
   platform_state_ = PlatformState::ERROR;
@@ -208,35 +288,17 @@ void PlatformSyncController::emergency_stop(const char *reason) {
 }
 
 void PlatformSyncController::preset(uint8_t num) {
-  if (platform_state_ == PlatformState::ERROR) {
-    ESP_LOGW(TAG, "Cannot move: platform in error state. Clear error first.");
-    return;
-  }
-
-  if (!all_desks_responding()) {
-    ESP_LOGW(TAG, "Cannot move: not all desks responding");
-    return;
-  }
-
-  if (num < 1 || num > 4) {
-    ESP_LOGW(TAG, "Invalid preset number: %d (must be 1-4)", num);
-    return;
-  }
-
-  ESP_LOGI(TAG, "Moving platform to preset %d", num);
-
-  // Send preset command to all desks
-  char cmd[4];
-  snprintf(cmd, sizeof(cmd), "*P%d", num);
-  broadcast_command(cmd);
-
-  // We don't know the target height for presets, so we can't do sync control
-  // Just set all desks to moving and monitor for errors
-  for (uint8_t i = 1; i <= num_desks_; i++) {
-    desk_state_[i - 1] = DeskState::MOVING;
-  }
-  platform_state_ = PlatformState::MOVING_UP;  // Arbitrary direction for presets
-  direction_ = Direction::UP;
+  // Presets are unsafe for a rigid coupled platform: each WN17CM3 stores its
+  // own preset heights and recalls them autonomously at its own speed, so the
+  // desks cannot be kept synchronized, the sync loop cannot supervise the move
+  // (no known target, no known direction), and it is unverified whether a stop
+  // key event even cancels an in-flight preset recall. Refuse without
+  // changing any state. Use move_to_height() instead - it computes direction
+  // from target vs current height and the sync/throttle logic applies.
+  ESP_LOGE(TAG,
+           "Platform preset %d REFUSED: presets trigger autonomous per-desk moves that "
+           "cannot be synchronized. Use move_to_height instead.",
+           num);
 }
 
 void PlatformSyncController::move_to_height(float height) {
@@ -245,8 +307,8 @@ void PlatformSyncController::move_to_height(float height) {
     return;
   }
 
-  if (!all_desks_responding()) {
-    ESP_LOGW(TAG, "Cannot move: not all desks responding");
+  if (!all_desks_have_reported()) {
+    ESP_LOGW(TAG, "Cannot move: not all desks have reported a recent height");
     return;
   }
 
@@ -272,6 +334,7 @@ void PlatformSyncController::move_to_height(float height) {
 void PlatformSyncController::start_movement(Direction dir) {
   direction_ = dir;
   platform_state_ = (dir == Direction::UP) ? PlatformState::MOVING_UP : PlatformState::MOVING_DOWN;
+  movement_started_at_ = millis();
 
   // Set all desks to moving state
   for (uint8_t i = 1; i <= num_desks_; i++) {
@@ -294,19 +357,73 @@ void PlatformSyncController::send_command_to_desk(uint8_t desk_id, const char *c
     return;
   }
 
-  ESP_LOGD(TAG, "Sending to desk %d: %s", desk_id, cmd);
+  // VERBOSE: this is a hot path (keepalive re-sends at the control loop rate)
+  ESP_LOGV(TAG, "Sending to desk %d: %s", desk_id, cmd);
 
-  // TODO: Implement ESP-NOW sending to specific desk
-  // This requires the ESP-NOW component and peer management
-  // For now, just log the command
+  // The master's own desk is wired directly to this board: drive it over the
+  // local UART instead of any transport
+  if (desk_id == LOCAL_DESK_ID && local_desk_sensor_ != nullptr) {
+    apply_local_command(cmd);
+    return;
+  }
+
+  if (send_callback_) {
+    send_callback_(desk_id, cmd);
+    return;
+  }
+
+  // No transport wired up: the command is NOT delivered. Warn loudly (but
+  // rate-limited, since the keepalive retries every control loop tick).
+  uint32_t now = millis();
+  if (now - last_no_transport_warn_ >= 1000) {
+    last_no_transport_warn_ = now;
+    ESP_LOGW(TAG, "No transport configured; command '%s' for desk %d NOT delivered", cmd, desk_id);
+  }
 }
 
 void PlatformSyncController::broadcast_command(const char *cmd) {
-  ESP_LOGD(TAG, "Broadcasting: %s", cmd);
+  ESP_LOGV(TAG, "Broadcasting: %s", cmd);
 
-  // TODO: Implement ESP-NOW broadcast
-  // This requires the ESP-NOW component
-  // For now, just log the command
+  // Broadcasts also apply to the directly attached desk
+  if (local_desk_sensor_ != nullptr) {
+    apply_local_command(cmd);
+  }
+
+  if (broadcast_callback_) {
+    broadcast_callback_(cmd);
+    return;
+  }
+
+  // No broadcast transport: fall back to per-desk unicast delivery (strip the
+  // '*' broadcast prefix - unicast commands are sent bare)
+  const char *bare_cmd = (cmd[0] == '*') ? cmd + 1 : cmd;
+  for (uint8_t i = 1; i <= num_desks_; i++) {
+    if (i == LOCAL_DESK_ID && local_desk_sensor_ != nullptr) {
+      continue;  // Already applied locally above
+    }
+    send_command_to_desk(i, bare_cmd);
+  }
+}
+
+void PlatformSyncController::apply_local_command(const char *cmd) {
+  if (local_desk_sensor_ == nullptr) {
+    return;
+  }
+
+  // Strip broadcast prefix
+  if (cmd[0] == '*') {
+    cmd++;
+  }
+
+  if (strcmp(cmd, "U") == 0) {
+    local_desk_sensor_->move_up();
+  } else if (strcmp(cmd, "D") == 0) {
+    local_desk_sensor_->move_down();
+  } else if (strcmp(cmd, "S") == 0) {
+    local_desk_sensor_->stop();
+  } else {
+    ESP_LOGW(TAG, "Unhandled local desk command: %s", cmd);
+  }
 }
 
 float PlatformSyncController::get_platform_height() const {
@@ -356,6 +473,24 @@ float PlatformSyncController::get_max_height() const {
   }
 
   return max_h;
+}
+
+bool PlatformSyncController::all_desks_have_reported() const {
+  uint32_t now = millis();
+
+  for (uint8_t i = 1; i <= num_desks_; i++) {
+    if (last_update_[i - 1] == 0) {
+      ESP_LOGW(TAG, "Desk %d has never reported a height", i);
+      return false;
+    }
+    if (now - last_update_[i - 1] > PRE_MOVE_MAX_AGE_MS) {
+      ESP_LOGW(TAG, "Desk %d height is stale (%d ms old, max %d ms) - refusing to start",
+               i, now - last_update_[i - 1], PRE_MOVE_MAX_AGE_MS);
+      return false;
+    }
+  }
+
+  return true;
 }
 
 bool PlatformSyncController::all_desks_responding() const {

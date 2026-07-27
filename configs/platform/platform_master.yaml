@@ -10,8 +10,16 @@
 
 substitutions:
   device_name: platform-master
-  # ESP-NOW channel must match slaves
-  espnow_channel: "1"
+  # MAC addresses of the four slave boards (WiFi STA MAC, printed in each slave's
+  # boot log). REPLACE these placeholders before flashing — ESP-NOW unicast sends
+  # and on_receive only work for correctly listed peers.
+  # Note: ESP-NOW inherits the WiFi channel in ESPHome 2025.11 (channel: is
+  # rejected when wifi: is configured) — ensure all five boards associate to the
+  # same AP/channel (pin the AP channel on mesh/multi-AP networks).
+  desk_2_mac: "00:00:00:00:00:02"
+  desk_3_mac: "00:00:00:00:00:03"
+  desk_4_mac: "00:00:00:00:00:04"
+  desk_5_mac: "00:00:00:00:00:05"
 
 esphome:
   name: ${device_name}
@@ -22,9 +30,49 @@ esphome:
       - lambda: |-
           ESP_LOGI("platform_master", "===========================================");
           ESP_LOGI("platform_master", "Platform Master Controller booting...");
-          ESP_LOGI("platform_master", "Firmware version: 2024-12-13-local-component");
+          ESP_LOGI("platform_master", "Firmware version: 2025-12-13-local-component/master");
           ESP_LOGI("platform_master", "UART RX: GPIO16, TX: GPIO17");
           ESP_LOGI("platform_master", "===========================================");
+      - lambda: |-
+          // Wire the sync controller's per-desk commands ("U"/"D"/"S"/"P<n>") to
+          // ESP-NOW unicast. Requires PlatformSyncController::set_send_callback()
+          // in components/platform_sync_controller.
+          id(platform_controller).set_send_callback([](uint8_t desk_id, const char *cmd) {
+            if (desk_id == 1) {
+              // Desk 1 is the master's directly connected desk — drive it over UART.
+              // (Re-send while moving is handled by the controller's control loop.)
+              if (strcmp(cmd, "U") == 0) {
+                id(desk_1_height).move_up();
+              } else if (strcmp(cmd, "D") == 0) {
+                id(desk_1_height).move_down();
+              } else if (cmd[0] == 'P' && cmd[1] >= '1' && cmd[1] <= '4') {
+                id(desk_1_height).preset(cmd[1] - '0');
+              } else {
+                id(desk_1_height).stop();
+              }
+              return;
+            }
+            if (desk_id < 2 || desk_id > 5)
+              return;
+            // Desk ID -> MAC table from substitutions, parsed once
+            static const char *desk_mac_strs[4] = {
+                "${desk_2_mac}", "${desk_3_mac}", "${desk_4_mac}", "${desk_5_mac}"};
+            static uint8_t desk_macs[4][6];
+            static bool macs_parsed = false;
+            if (!macs_parsed) {
+              for (int i = 0; i < 4; i++) {
+                unsigned int b[6] = {0};
+                sscanf(desk_mac_strs[i], "%x:%x:%x:%x:%x:%x",
+                       &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]);
+                for (int j = 0; j < 6; j++)
+                  desk_macs[i][j] = (uint8_t) b[j];
+              }
+              macs_parsed = true;
+            }
+            // Queued, non-blocking send — safe to call from the 20Hz control loop
+            id(espnow_component)->send(desk_macs[desk_id - 2],
+                                       reinterpret_cast<const uint8_t *>(cmd), strlen(cmd));
+          });
 
 esp32:
   board: esp32dev
@@ -55,7 +103,8 @@ ota:
 
 logger:
   level: DEBUG
-  baud_rate: 0  # Disable serial logging to avoid UART conflicts
+  # Serial (USB) logging stays enabled: the desk UART is on GPIO16/17 (UART2),
+  # which does not conflict with UART0 logging on ESP32
 
 # Web server for debugging
 web_server:
@@ -74,16 +123,6 @@ uart:
   rx_pin: GPIO16
   tx_pin: GPIO17
   baud_rate: 19200
-
-# Global variables
-globals:
-  - id: slave_heights
-    type: float[5]
-    restore_value: no
-  - id: last_error_message
-    type: std::string
-    restore_value: no
-    initial_value: '""'
 
 # Local desk 1 height sensor (master's directly connected desk)
 sensor:
@@ -133,34 +172,40 @@ sensor:
     lambda: return id(platform_controller).get_max_height();
     update_interval: 250ms
 
-  # Individual desk heights (from ESP-NOW)
+  # Individual desk heights as seen by the sync controller (ESP-NOW mirrors).
+  # Named "(Sync View)" so they can't be mistaken for the slaves' live UART
+  # sensors ("Desk N Height") when debugging heights in HA.
   - platform: template
-    name: "Desk 2 Height"
+    name: "Desk 2 Height (Sync View)"
     id: desk_2_height_sensor
+    entity_category: diagnostic
     unit_of_measurement: "cm"
     accuracy_decimals: 2
     lambda: return id(platform_controller).get_desk_height(2);
     update_interval: 500ms
 
   - platform: template
-    name: "Desk 3 Height"
+    name: "Desk 3 Height (Sync View)"
     id: desk_3_height_sensor
+    entity_category: diagnostic
     unit_of_measurement: "cm"
     accuracy_decimals: 2
     lambda: return id(platform_controller).get_desk_height(3);
     update_interval: 500ms
 
   - platform: template
-    name: "Desk 4 Height"
+    name: "Desk 4 Height (Sync View)"
     id: desk_4_height_sensor
+    entity_category: diagnostic
     unit_of_measurement: "cm"
     accuracy_decimals: 2
     lambda: return id(platform_controller).get_desk_height(4);
     update_interval: 500ms
 
   - platform: template
-    name: "Desk 5 Height"
+    name: "Desk 5 Height (Sync View)"
     id: desk_5_height_sensor
+    entity_category: diagnostic
     unit_of_measurement: "cm"
     accuracy_decimals: 2
     lambda: return id(platform_controller).get_desk_height(5);
@@ -183,7 +228,11 @@ platform_sync_controller:
   resume_threshold: 0.2     # Resume when within 0.2cm of slowest
   emergency_threshold: 1.0  # Emergency stop if spread > 1.0cm
   comm_timeout: 250         # Stop if desk doesn't report for 250ms
-  num_desks: 5              # Total desks including master's desk 1
+  num_desks: 5              # Total desks including master's desk 1.
+                            # Set to 2 or 3 for the first bench sync test — the master
+                            # refuses ALL movement until every desk 1..num_desks reports
+                            # within comm_timeout. Slaves must use contiguous desk_ids
+                            # starting at 2.
   control_loop_interval: 50 # Run sync algorithm at ~20Hz
 
 # Binary sensors for status
@@ -291,24 +340,27 @@ button:
     on_press:
       - lambda: id(platform_controller).preset(4);
 
-  # Local desk 1 controls (for testing without sync)
+  # Local desk 1 controls (for testing without sync).
+  # These drive the desk_1_move_up/down hold switches so the 100ms re-send
+  # interval keeps the desk moving — a single move command only nudges the desk
+  # a tiny amount (Dec 13 hardware finding).
   - platform: template
     name: "Desk 1 Up (Local)"
     icon: mdi:arrow-up
     entity_category: diagnostic
     on_press:
-      - standing_desk_height.move_up: desk_1_height
-      - delay: 100ms
-      - standing_desk_height.stop: desk_1_height
+      - switch.turn_on: desk_1_move_up
+      - delay: 500ms
+      - switch.turn_off: desk_1_move_up
 
   - platform: template
     name: "Desk 1 Down (Local)"
     icon: mdi:arrow-down
     entity_category: diagnostic
     on_press:
-      - standing_desk_height.move_down: desk_1_height
-      - delay: 100ms
-      - standing_desk_height.stop: desk_1_height
+      - switch.turn_on: desk_1_move_down
+      - delay: 500ms
+      - switch.turn_off: desk_1_move_down
 
   - platform: restart
     name: "Master Restart"
@@ -327,26 +379,32 @@ number:
     set_action:
       - lambda: id(platform_controller).move_to_height(x);
 
-# ESP-NOW configuration for slave communication
-# Note: ESP-NOW component required
-# espnow:
-#   id: espnow_component
-#   wifi_channel: ${espnow_channel}
-#   on_receive:
-#     - lambda: |-
-#         // Parse height reports from slaves: "H<id>:<height>"
-#         std::string msg((char*)data, len);
-#         ESP_LOGD("espnow", "Received: %s", msg.c_str());
-#
-#         if (msg[0] == 'H' && msg.length() >= 5) {
-#           // Parse "H2:72.35"
-#           uint8_t desk_id = msg[1] - '0';
-#           size_t colon_pos = msg.find(':');
-#           if (colon_pos != std::string::npos) {
-#             float height = std::stof(msg.substr(colon_pos + 1));
-#             id(platform_controller).on_height_received(desk_id, height);
-#           }
-#         }
+# ESP-NOW link to the slave desks.
+# ESP-NOW inherits the WiFi channel in ESPHome 2025.11 (channel: is rejected when
+# wifi: is configured) — ensure all five boards associate to the same AP/channel.
+espnow:
+  id: espnow_component
+  # on_receive only fires for registered peers — the slave MACs must be correct
+  peers:
+    - ${desk_2_mac}
+    - ${desk_3_mac}
+    - ${desk_4_mac}
+    - ${desk_5_mac}
+  on_receive:
+    - lambda: |-
+        // Parse height reports from slaves: "H<id>:<height>"
+        std::string msg(reinterpret_cast<const char *>(data), size);
+        ESP_LOGV("espnow", "Received: %s", msg.c_str());
+
+        if (msg.length() >= 4 && msg[0] == 'H') {
+          // Parse "H2:72.35"
+          uint8_t desk_id = msg[1] - '0';
+          size_t colon_pos = msg.find(':');
+          if (colon_pos != std::string::npos && colon_pos + 1 < msg.length()) {
+            float height = strtof(msg.c_str() + colon_pos + 1, nullptr);
+            id(platform_controller).on_height_received(desk_id, height);
+          }
+        }
 
 # Status LED
 status_led:
@@ -374,19 +432,33 @@ switch:
     turn_off_action:
       - lambda: id(platform_controller).stop();
 
-# Interval for simulated height updates (for testing without ESP-NOW)
-# Remove this when ESP-NOW is configured
+  # Local desk 1 hold-to-move (diagnostic, bypasses the sync controller)
+  - platform: template
+    name: "Desk 1 Move Up (Local)"
+    id: desk_1_move_up
+    icon: mdi:arrow-up
+    entity_category: diagnostic
+    optimistic: true
+    turn_off_action:
+      - standing_desk_height.stop: desk_1_height
+
+  - platform: template
+    name: "Desk 1 Move Down (Local)"
+    id: desk_1_move_down
+    icon: mdi:arrow-down
+    entity_category: diagnostic
+    optimistic: true
+    turn_off_action:
+      - standing_desk_height.stop: desk_1_height
+
+# Interval to re-send move commands while a local desk 1 hold switch is on
+# (the WN17CM3 only moves while the command is re-sent ~every 100ms)
 interval:
-  - interval: 500ms
+  - interval: 100ms
     then:
       - lambda: |-
-          // Simulated height updates for testing (remove when ESP-NOW is working)
-          // This simulates all desks at the same height as desk 1
-          float h1 = id(desk_1_height).state;
-          if (!isnan(h1) && h1 > 0) {
-            // Simulate desks 2-5 with slight variations
-            id(platform_controller).on_height_received(2, h1 + 0.05);
-            id(platform_controller).on_height_received(3, h1 - 0.03);
-            id(platform_controller).on_height_received(4, h1 + 0.02);
-            id(platform_controller).on_height_received(5, h1 - 0.01);
+          if (id(desk_1_move_up).state) {
+            id(desk_1_height).move_up();
+          } else if (id(desk_1_move_down).state) {
+            id(desk_1_height).move_down();
           }

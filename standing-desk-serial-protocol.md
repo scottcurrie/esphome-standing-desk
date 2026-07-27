@@ -31,8 +31,12 @@ Model: WN17CM3
 # UART Settings
 Baud Rate: 19200  
 Data Bits: 8  
-Stop Bits: 0  
+Stop Bits: 1  
 Parity: None
+
+Note: the original reverse-engineering notes (copied from swoga/standingdesk) recorded
+"Stop Bits: 0", which is not a valid UART framing. Working setups use 19200 8N1
+(1 stop bit, ESPHome's default).
 
 All data is sent as strings.
 

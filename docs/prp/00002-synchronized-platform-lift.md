@@ -5,10 +5,18 @@
 | Phase | Status |
 |-------|--------|
 | Phase 1: Slave Component & Configuration | ✅ Complete |
-| Phase 2: Sync Controller Component | ✅ Complete |
-| Phase 3: Master Configuration | ✅ Complete |
-| Phase 4: Safety Features | ✅ Complete |
+| Phase 2: Sync Controller Component | ⚠️ Partial — control-loop logic written, but the ESP-NOW transport is a log-only stub (`send_command_to_desk()`/`broadcast_command()` in `platform_sync_controller.cpp`); the 2-ESP32 comm test has never run |
+| Phase 3: Master Configuration | ⚠️ Partial — master YAML exists and manual hold-to-move switches drive desk 1 directly, but platform controller commands reach no desk (stub transport), slave heights are simulated by an interval in `platform_master.yaml`, and the commented-out `espnow:` block is invalid for ESPHome 2025.11 |
+| Phase 4: Safety Features | ⚠️ Partial — e-stop/timeout logic exists in C++ but emergency stop physically stops nothing (it goes through the stub broadcast); unverified |
 | Phase 5: Hardware Setup & Testing | ⏳ Pending |
+
+### Known Gaps Before Phase 5
+
+- [ ] Implement ESP-NOW send/receive (native `espnow:` component, available since ESPHome 2025.8; register slave MACs in a `peers:` list; do NOT set a channel option — it is rejected when a `wifi:` block exists, and ESP-NOW follows the WiFi channel)
+- [ ] Wire the sync controller to desk 1's local UART command path — including on emergency stop, which currently reaches no desk
+- [ ] Remove the simulated slave-height interval from `platform_master.yaml`
+- [ ] Honor the 100ms command re-send requirement in the control loop (WN17CM3 desks stop unless move commands are re-sent continuously)
+- [ ] Hardware-verify that mid-motion height frames are received after the 20-150cm sanity-filter widening (run `wn17cm3_decoder` logging at VERBOSE to see accepted AND rejected frames)
 
 ## Overview
 
@@ -134,24 +142,28 @@ When `standalone_mode: true`:
 |------|-----|---------|-------|
 | ESP32 DevKit (ESP-WROOM-32) | 5 | Controllers | ~$6-8 each |
 | RJ45 Breakout Board | 5 | Connect to desk ports | ~$2 each |
+| Bi-directional logic level shifter (3.3V/5V) | 5 | UART level shifting | ~$1-2 each; mandatory, desk uses 5V logic |
 | Dupont jumper wires | 1 pack | Short connections | ~$5 |
 
-**Total: ~$50-60**
+**Total: ~$50-70**
 
 No separate power supplies needed - desks provide 5V via RJ45 pin 5.
 
 ### Wiring (Per Desk)
 
-```
-Desk RJ45 Port          ESP32
-─────────────           ─────
-Pin 2 (Blue)   ───────► GPIO17 (TX2)
-Pin 3 (Black)  ───────► GND
-Pin 4 (Yellow) ───────► GPIO16 (RX2)
-Pin 5 (Red)    ───────► VIN (5V power)
-```
+The desk controller uses 5V logic; ESP32 GPIOs are 3.3V and NOT 5V-tolerant. Both UART
+lines must go through a bi-directional level shifter (this matches the only configuration
+verified on real hardware — see `configs/platform/platform_standalone.yaml`):
 
-Each desk requires only 4 short wires (~6 inches).
+```
+Desk RJ45 Port                                ESP32
+─────────────                                 ─────
+Pin 2 (Blue)   ◄── level shifter (HV◄─LV) ─── GPIO17 (TX2)
+Pin 3 (Black)  ────────────────────────────►  GND
+Pin 4 (Yellow) ─── level shifter (HV─►LV) ──► GPIO16 (RX2)
+Pin 5 (Red)    ─┬──────────────────────────►  VIN (5V power)
+                └─► level shifter HV supply (LV supply from ESP32 3V3)
+```
 
 ### Architecture
 

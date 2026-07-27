@@ -11,6 +11,7 @@ DEPENDENCIES = []
 CONF_PAUSE_THRESHOLD = "pause_threshold"
 CONF_RESUME_THRESHOLD = "resume_threshold"
 CONF_EMERGENCY_THRESHOLD = "emergency_threshold"
+CONF_TARGET_TOLERANCE = "target_tolerance"
 CONF_COMM_TIMEOUT = "comm_timeout"
 CONF_NUM_DESKS = "num_desks"
 CONF_LOCAL_DESK_SENSOR = "local_desk_sensor"
@@ -19,6 +20,13 @@ CONF_CONTROL_LOOP_INTERVAL = "control_loop_interval"
 # Namespace
 platform_sync_ns = cg.esphome_ns.namespace("platform_sync_controller")
 PlatformSyncController = platform_sync_ns.class_("PlatformSyncController", cg.Component)
+
+# StandingDeskHeightSensor from the sibling standing_desk_height component
+# (declared by full C++ name so cv.use_id type-checks against the sensor's ID)
+standing_desk_height_ns = cg.esphome_ns.namespace("standing_desk_height")
+StandingDeskHeightSensor = standing_desk_height_ns.class_(
+    "StandingDeskHeightSensor", cg.PollingComponent
+)
 
 # Action classes
 MoveUpAction = platform_sync_ns.class_("MoveUpAction", automation.Action)
@@ -95,9 +103,11 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_PAUSE_THRESHOLD, default=0.3): cv.float_range(min=0.1, max=1.0),
         cv.Optional(CONF_RESUME_THRESHOLD, default=0.2): cv.float_range(min=0.05, max=0.5),
         cv.Optional(CONF_EMERGENCY_THRESHOLD, default=1.0): cv.float_range(min=0.5, max=5.0),
+        cv.Optional(CONF_TARGET_TOLERANCE, default=0.3): cv.float_range(min=0.1, max=2.0),
         cv.Optional(CONF_COMM_TIMEOUT, default=250): cv.int_range(min=100, max=5000),
         cv.Optional(CONF_NUM_DESKS, default=5): cv.int_range(min=2, max=10),
         cv.Optional(CONF_CONTROL_LOOP_INTERVAL, default=50): cv.int_range(min=10, max=200),
+        cv.Optional(CONF_LOCAL_DESK_SENSOR): cv.use_id(StandingDeskHeightSensor),
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -109,6 +119,11 @@ async def to_code(config):
     cg.add(var.set_pause_threshold(config[CONF_PAUSE_THRESHOLD]))
     cg.add(var.set_resume_threshold(config[CONF_RESUME_THRESHOLD]))
     cg.add(var.set_emergency_threshold(config[CONF_EMERGENCY_THRESHOLD]))
+    cg.add(var.set_target_tolerance(config[CONF_TARGET_TOLERANCE]))
     cg.add(var.set_comm_timeout(config[CONF_COMM_TIMEOUT]))
     cg.add(var.set_num_desks(config[CONF_NUM_DESKS]))
     cg.add(var.set_control_loop_interval(config[CONF_CONTROL_LOOP_INTERVAL]))
+
+    if CONF_LOCAL_DESK_SENSOR in config:
+        local_sensor = await cg.get_variable(config[CONF_LOCAL_DESK_SENSOR])
+        cg.add(var.set_local_desk_sensor(local_sensor))

@@ -26,6 +26,7 @@ class Wn17cm3Decoder : public Decoder {
   void send_key_pressed(const char *key);
   void send_key_released(const char *key);
   void send_ack();
+  void send_boot_banner();
 
  protected:
   uart::UARTDevice *uart_{nullptr};
@@ -37,6 +38,9 @@ class Wn17cm3Decoder : public Decoder {
   bool in_message_ = false;
 
   float last_height_ = -1;
+
+  // Currently held key ("UA", "DA", " 1".." 4"), used to answer R polls
+  char held_key_[4] = "";
 
   void reset();
   uint8_t calculate_checksum(const char *data, size_t len);

@@ -64,7 +64,7 @@ bool Wn17cm3Decoder::put(uint8_t b) {
 bool Wn17cm3Decoder::process_message() {
   // Minimum: 1 command char + 2 checksum chars = 3
   if (buf_len_ < 3) {
-    ESP_LOGV(TAG, "Message too short: %zu bytes", buf_len_);
+    ESP_LOGW(TAG, "Message too short: %zu bytes", buf_len_);
     return false;
   }
 
@@ -93,10 +93,27 @@ bool Wn17cm3Decoder::process_message() {
 
   // Parse command (first char after checksum validation)
   if (buf_[0] == 'D') {
+    // The protocol requires the remote to ACK EVERY display command, including
+    // display-off (":D44;") and non-numeric display text -- real handsets ACK
+    // all D frames, not just parseable in-range heights
+    send_ack();
     return parse_display_command();
   }
 
-  // Other commands (A=ack, K=key, R=request, etc.) - ignore for now
+  if (buf_[0] == 'R') {
+    // Controller is requesting the current key state; a real remote answers
+    // with K<key><action>. Only answer while a key is held: the idle "no key"
+    // response is undocumented, so don't invent one.
+    if (held_key_[0] != '\0') {
+      send_key_pressed(held_key_);
+    } else {
+      ESP_LOGD(TAG, "Key-state poll (R) received while idle; not replying (idle response unknown)");
+    }
+    return false;
+  }
+
+  // Other checksum-valid commands (A=ack, K=key echo, etc.) - log for visibility
+  ESP_LOGD(TAG, "Ignoring non-display frame: %s", buf_);
   return false;
 }
 
@@ -138,13 +155,12 @@ bool Wn17cm3Decoder::parse_display_command() {
 
   // Sanity check (reasonable desk height range in cm)
   if (height < 20.0 || height > 150.0) {
-    ESP_LOGV(TAG, "Height out of expected range: %.1f", height);
+    ESP_LOGW(TAG, "Height out of expected range: %.1f", height);
     return false;
   }
 
   last_height_ = height;
   ESP_LOGD(TAG, "Decoded height: %.1f cm", height);
-  send_ack();  // Acknowledge the display command (required by protocol)
   return true;
 }
 
@@ -174,6 +190,11 @@ void Wn17cm3Decoder::send_key_pressed(const char *key) {
   // Format: K<key>M (M = pressed)
   char cmd[8];
   snprintf(cmd, sizeof(cmd), "K%sM", key);
+  // Track the held key so the controller's R (key-state) polls can be answered
+  if (key != held_key_) {  // Avoid self-copy when re-sent from the R poll handler
+    strncpy(held_key_, key, sizeof(held_key_) - 1);
+    held_key_[sizeof(held_key_) - 1] = '\0';
+  }
   send_command(cmd);
 }
 
@@ -181,12 +202,21 @@ void Wn17cm3Decoder::send_key_released(const char *key) {
   // Format: K<key>B (B = released)
   char cmd[8];
   snprintf(cmd, sizeof(cmd), "K%sB", key);
+  if (strcmp(held_key_, key) == 0) {
+    held_key_[0] = '\0';
+  }
   send_command(cmd);
 }
 
 void Wn17cm3Decoder::send_ack() {
   // Send ACK response to controller (required by protocol)
   send_command("A");
+}
+
+void Wn17cm3Decoder::send_boot_banner() {
+  // A real handset announces itself once on connect (see
+  // standing-desk-serial-protocol.md); emulate the documented WN18H32 banner
+  send_command("WN18H32.V2.00.1918.001");
 }
 
 }  // namespace standing_desk_height
