@@ -20,7 +20,11 @@ esphome:
     priority: 200
     then:
       - lambda: |-
+          ESP_LOGI("platform_master", "===========================================");
           ESP_LOGI("platform_master", "Platform Master Controller booting...");
+          ESP_LOGI("platform_master", "Firmware version: 2024-12-13-local-component");
+          ESP_LOGI("platform_master", "UART RX: GPIO16, TX: GPIO17");
+          ESP_LOGI("platform_master", "===========================================");
 
 esp32:
   board: esp32dev
@@ -57,12 +61,11 @@ logger:
 web_server:
   port: 80
 
-# External components (from GitHub fork)
+# External components (local development)
 external_components:
   - source:
-      type: git
-      url: https://github.com/scottcurrie/esphome-standing-desk
-      ref: master
+      type: local
+      path: ../../components
     components: [standing_desk_height, platform_sync_controller]
 
 # UART for local desk 1 (master connects directly to one desk)
@@ -348,6 +351,28 @@ number:
 # Status LED
 status_led:
   pin: GPIO2
+
+# Switches for hold-to-move control (use with Lovelace button-card hold_action)
+switch:
+  - platform: template
+    name: "Platform Move Up"
+    id: platform_move_up
+    icon: mdi:arrow-up-bold
+    optimistic: true
+    turn_on_action:
+      - lambda: id(platform_controller).move_up();
+    turn_off_action:
+      - lambda: id(platform_controller).stop();
+
+  - platform: template
+    name: "Platform Move Down"
+    id: platform_move_down
+    icon: mdi:arrow-down-bold
+    optimistic: true
+    turn_on_action:
+      - lambda: id(platform_controller).move_down();
+    turn_off_action:
+      - lambda: id(platform_controller).stop();
 
 # Interval for simulated height updates (for testing without ESP-NOW)
 # Remove this when ESP-NOW is configured

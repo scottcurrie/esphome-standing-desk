@@ -8,15 +8,15 @@
 #
 # Hardware: ESP32 DevKit connected to WN17CM3 desk controller via RJ45
 # Wiring:
-#   RJ45 Pin 2 (Blue)   -> GPIO17 (TX2)
+#   RJ45 Pin 2 (Blue)   -> GPIO17 (TX) via level shifter
 #   RJ45 Pin 3 (Black)  -> GND
-#   RJ45 Pin 4 (Yellow) -> GPIO16 (RX2)
-#   RJ45 Pin 5 (Red)    -> VIN (5V power from desk)
+#   RJ45 Pin 4 (Yellow) -> GPIO16 (RX) via level shifter
+#   RJ45 Pin 5 (Red)    -> VIN (5V power) and level shifter HV
 
 substitutions:
-  desk_id: "2"  # Change for each slave: 2, 3, 4, 5
+  desk_id: "1"  # Change for each slave: 2, 3, 4, 5
   device_name: platform-desk-${desk_id}
-  standalone_mode: "false"  # Set "true" for individual desk testing without master
+  standalone_mode: "true"  # Set "true" for individual desk testing without master
   # ESP-NOW channel must match master
   espnow_channel: "1"
 

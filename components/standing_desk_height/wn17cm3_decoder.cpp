@@ -137,7 +137,7 @@ bool Wn17cm3Decoder::parse_display_command() {
   }
 
   // Sanity check (reasonable desk height range in cm)
-  if (height < 50.0 || height > 150.0) {
+  if (height < 20.0 || height > 150.0) {
     ESP_LOGV(TAG, "Height out of expected range: %.1f", height);
     return false;
   }
